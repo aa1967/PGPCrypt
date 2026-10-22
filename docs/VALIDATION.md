@@ -1,5 +1,39 @@
 # Validation history
 
+## Alpha5 evidence
+
+Source was pushed before tests. Debian backports Rust/Cargo 1.96.1 built the
+application against Debian 13 libraries; no rustup installation was used.
+Functional source validated at `9c0e87b` (later documentation updates do not
+change these binaries):
+
+| Check | Result |
+| --- | --- |
+| Rust all-features | 20 passed: 16 core, 1 parent-death and 3 worker protocol tests; no failures or ignored tests. |
+| KDBX authentication/bounds | Wrong password, modified/truncated/appended data, excessive KDF cost and unsupported XML rejected. |
+| Conversion | age → KDBX → age retained key packets, revocation, notes and timeout; originals unchanged; existing destination refused; mode 0600. |
+| KeePassXC 2.7.10 (Debian 13) | Read protected public/private armor and revocation; edit notes/save as KDBX 4.0; reopen and save as 4.1; unrelated entry retained and readable again in KeePassXC. |
+| age 1.2.1 | Independently decrypted PGPCrypt JSON, re-encrypted it, and PGPCrypt reopened it. |
+| Future remote protocol | Unknown operations, passwords, spoofed domain fields, unsupported versions and oversized/multiple frames rejected. No qrexec service is enabled. |
+| Packaged Qt workflows | age and KDBX create/generate/encrypt/decrypt/sign/verify/notes/lock passed offscreen; supervisor replaced the UI process on lock. |
+| Package | ELF dependencies resolved, no build RPATH, private vault creation and read-only-directory permission guidance passed. No system installation performed. |
+| Tooling | Rust formatting/Clippy and C++ warnings-as-errors compile passed. Action commit pins verified upstream to use Node.js 24. |
+
+The workflow repeats source, interoperability and package checks on GitHub after
+push. A real Debian StandaloneVM install, Qubes clipboard/lock/suspend behavior,
+KeePass 2, power-loss recovery, independent security review and comprehensive
+advisory assessment remain untested. The KDBX writer is marked experimental by
+its upstream. These results establish interoperability and regression coverage,
+not a security audit.
+
+## Alpha4 workflow
+
+No tests run before the source push, following the user's workflow preference.
+Post-push checks cover the new start/create flow, live weak/strong estimates,
+matching confirmation, and default-home creation when started in a protected
+package directory. The package checker drops root privileges in Debian CI.
+These results must come from the actual run; source compilation is not a test.
+
 ## Alpha3 workflow
 
 At the user's request, tests are not run locally before committing or pushing.

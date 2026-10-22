@@ -2,7 +2,7 @@
 name = "pgpcrypt"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 description = "An experimental offline encrypted OpenPGP vault and desktop text workspace"
 default-run = "pgpcrypt-worker"
 
@@ -23,6 +23,9 @@ required-features = ["legacy-migration"]
 anyhow = "1"
 age = "=0.12.1"
 libc = "0.2"
+keepass = { version = "=0.17.0", features = ["save_kdbx4"] }
+rust-argon2 = "3.0"
+quick-xml = "0.42"
 rpassword = { version = "7.5", optional = true }
 sequoia-openpgp = { version = "2.4", default-features = false, features = ["crypto-openssl", "compression-deflate"] }
 serde = { version = "1", features = ["derive"] }
@@ -39,6 +42,12 @@ debug = 0
 opt-level = 3
 
 [profile.dev.package.salsa20]
+opt-level = 3
+
+[profile.dev.package.rust-argon2]
+opt-level = 3
+
+[profile.dev.package.blake2b_simd]
 opt-level = 3
 
 [profile.release]

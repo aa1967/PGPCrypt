@@ -4,7 +4,7 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
 ./scripts/build-desktop.sh --release
 ./scripts/dev.sh build --release --locked --features legacy-migration --bin pgpcrypt-migrate -j 4
-package_version=${PGPCRYPT_PACKAGE_VERSION:-0.1.0~alpha3}
+package_version=${PGPCRYPT_PACKAGE_VERSION:-0.1.0~alpha5}
 dpkg --validate-version "$package_version"
 # GitHub release uploads normalize '~' to '.', so choose that filename before
 # computing checksums. Debian's internal Version retains prerelease ordering.
@@ -71,11 +71,11 @@ Priority: optional
 Architecture: $package_arch
 Maintainer: PGPCrypt contributors
 Installed-Size: $installed_size
-Depends: libc6 (>= 2.41), libgcc-s1, libssl3t64 (>= 3.5), libsodium23, libqt6core6t64 (>= 6.8.2), libqt6gui6 (>= 6.8.2), libqt6widgets6 (>= 6.8.2), libqt6dbus6 (>= 6.8.2), qt6-qpa-plugins, qt6-wayland
+Depends: libc6 (>= 2.41), libgcc-s1, libssl3t64 (>= 3.5), libsodium23, libzxcvbn0, libqt6core6t64 (>= 6.8.2), libqt6gui6 (>= 6.8.2), libqt6widgets6 (>= 6.8.2), libqt6dbus6 (>= 6.8.2), qt6-qpa-plugins, qt6-wayland
 Description: Experimental encrypted OpenPGP vault and desktop text workspace
  Stores public and private OpenPGP keys and notes in a passphrase-encrypted vault.
  Qt6 desktop interface with a separate Rust crypto worker. Offline by default.
- Standard age v1 vault encryption; application alpha for local evaluation.
+ Standard age v1 or KDBX 4.1 vault encryption; application alpha for local evaluation.
 EOF
 mkdir -p dist
 archive="$repo_root/dist/pgpcrypt_${filename_version}_${package_arch}.deb"

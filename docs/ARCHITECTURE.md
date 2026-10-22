@@ -78,3 +78,15 @@ Use actual functional, negative/authentication, migration and cross-implementati
 tests, not syntax-only or zero-test success. Keep failed/skipped/unrun checks
 separate. See [VALIDATION.md](VALIDATION.md), [UI_SECURITY.md](UI_SECURITY.md),
 and the historical [reference review](REFERENCE_REVIEW.md).
+
+## Optional KDBX and Qubes preparation (alpha5)
+
+The vault layer dispatches age v1 or KDBX 4.1 persistence. `src/kdbx.rs` uses
+keepass-rs for crypto and an application-level preflight to bound KDF work,
+reject compression and refuse unsupported XML fields. `convert_copy` writes
+a new encrypted destination without modifying the source. See
+[KDBX_COMPATIBILITY.md](KDBX_COMPATIBILITY.md) for portable entry fields.
+
+`src/qubes.rs` defines a strict future remote decoder, separate from the local
+worker request type. No RPC bridge is installed. See [QUBES.md](QUBES.md) for
+StandaloneVM deployment and the remaining authenticated broker/policy work.

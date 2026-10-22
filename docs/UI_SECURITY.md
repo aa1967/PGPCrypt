@@ -30,8 +30,17 @@ It is not a sandbox against the UI while unlocked.
 
 - Plaintext uses QPlainTextEdit; undo/redo is disabled and HTML is not rendered.
 - Password entries use password mode and sensitive/no-prediction input hints.
-- No saved window state, recent-vault list, or plaintext autosave. Vault paths
-  are entered directly to avoid native file-dialog history persistence.
+- No saved window state, recent-vault list, or plaintext autosave. The file
+  browser uses Qt widgets instead of native/portal dialogs. Per-user QSettings
+  paths point at `/dev/null` (a non-directory), preventing QtProject.conf history
+  and last-directory writes; this affects this process only.
+- New vaults default to `~/vault.pgpcrypt.age`. Relative paths and `~/` expand
+  under the current user's home, independently of the launch directory.
+- Creation always requires matching password/passphrase confirmation. A
+  debounced local libzxcvbn estimate recognizes common passwords and patterns;
+  it makes no strength guarantee, and no password is sent to a service. New
+  creation fields accept up to 256 UTF-16 code units; opening preserves the
+  previous 32767-code-unit limit for existing vaults.
 - Idle, focus loss, and event-loop gaps request lock. Best-effort logind lock/
   suspend and freedesktop screensaver signal subscriptions are wired.
 - UI and worker disable core dumps and Linux process dumpability.

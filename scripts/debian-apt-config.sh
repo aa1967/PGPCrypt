@@ -16,6 +16,7 @@ APT::Install-Recommends "false";
 EOF
     cat > "$apt_root/sources.list" <<'EOF'
 deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://deb.debian.org/debian trixie main
+deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://deb.debian.org/debian trixie-backports main
 deb [signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] https://security.debian.org/debian-security trixie-security main
 EOF
     export APT_CONFIG="$apt_root/apt.conf"
