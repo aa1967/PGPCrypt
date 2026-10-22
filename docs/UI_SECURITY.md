@@ -45,6 +45,10 @@ It is not a sandbox against the UI while unlocked.
 - Opt-in inactivity/focus/session rules request lock. All are off until enabled
   in Settings. Best-effort logind lock/
   suspend and freedesktop screensaver signal subscriptions are wired.
+- Notepad message files are explicitly opened/saved via the same nonpersistent
+  Qt browser. Input is bounded UTF-8 text, and saves use a private mode-0600
+  same-directory temporary file, fsync and atomic rename. Readable output
+  requires confirmation; saving does not put the file inside the vault.
 - UI and worker disable core dumps and Linux process dumpability.
 - Lock deliberately discards unsaved text. The notes page is removed; old saved
   notes remain in the encrypted container.

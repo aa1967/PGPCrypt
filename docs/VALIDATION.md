@@ -1,5 +1,38 @@
 # Validation history
 
+## Alpha8 evidence
+
+Functional source `2901826` and follow-up test expectations `afda4f9` / `74f7347`
+were pushed before their checks ran. All 30 Rust tests passed in the final
+combined runs (23 core, 1 independent GnuPG interop, 6 worker/lifecycle/adapter).
+New coverage exercises readable signatures, altered text rejection, legacy
+opaque verification, mixed-password signing candidates, imported empty
+passwords, hostile/aggregate S2K work refusal, and reopening the largest generated
+text messages. Cleartext newline assertions distinguish framework text from
+GnuPG's rendered separator; signatures are independently checked with `gpg --verify`.
+
+Independent Debian age schema-1/2/3/4 compatibility passed. KeePassXC 2.7.10
+read all protected armor fields, retained user-edited key notes and unrelated
+entries, edited/saved/reopened KDBX, and recovered the keys through age conversion.
+Its save made while PGPCrypt was open was preserved; PGPCrypt refused the stale
+write and reopened the external change. Core coverage also rejected deleted or
+symlinked stale destinations and mixed public/private KDBX fields.
+
+The alpha8 `.deb` passed packaged age and KDBX Qt workflows, including clear-sign,
+verify, optional key passwords, private message save/load, local Qubes approval/
+denial and worker termination. Lock/restart produced a different UI process.
+The updated Notepad layout was visually checked offscreen in Solarized dark.
+All four packaged ELF dependencies resolved without RPATH, RPC handlers and
+OpenSSL minimum dependency were present, and writable-path guidance passed.
+No system installation was performed. Rust formatting/Clippy and C++
+warnings-as-errors compilation passed. Cloud compilation/validation used the
+rootlessly extracted, authenticated Debian OpenSSL `3.5.7-1~deb13u3` libraries.
+
+These checks do not cover real Qubes transport/host hooks, native clipboard/
+compositor behavior, abrupt-power-loss recovery, every filesystem race, or an
+independent security audit. The KDBX writer remains experimental upstream.
+Advisory findings and remaining scope are in [the review](SECURITY_REVIEW_ALPHA8.md).
+
 ## Alpha7 evidence
 
 Functional source `1f9bee2` was pushed before execution. All 24 Rust tests passed
