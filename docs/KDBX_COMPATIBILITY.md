@@ -12,7 +12,8 @@ New KDBX files use AES-256-CBC with KDBX's authenticated header/HMAC block strea
 Argon2id v1.3 (64 MiB, 3 iterations, 1 lane), and ChaCha20 protected fields.
 The maintained library performs all cryptographic operations. No new cipher,
 KDF or encryption framing is defined by PGPCrypt. Saves regenerate salts and
-keys, retaining the supported KDF settings of existing databases. The application checks the public container framing before invoking it.
+keys, retaining the supported KDF settings of existing databases. Saves write
+KDBX 4.1, including after KeePassXC has saved a compatible KDBX 4.0 snapshot. The application checks the public container framing before invoking it.
 
 The first read/write profile accepts KDBX 4.0 and 4.1, AES-256, Argon2id v1.3, no
 compression, a 32-byte salt, 64–256 MiB memory, 1–10 iterations and 1–4 lanes.

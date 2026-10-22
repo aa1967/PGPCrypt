@@ -44,6 +44,12 @@ opt-level = 3
 [profile.dev.package.salsa20]
 opt-level = 3
 
+[profile.dev.package.rust-argon2]
+opt-level = 3
+
+[profile.dev.package.blake2b_simd]
+opt-level = 3
+
 [profile.release]
 lto = "thin"
 strip = true

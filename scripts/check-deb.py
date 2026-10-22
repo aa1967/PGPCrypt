@@ -75,7 +75,7 @@ def main():
         assert "lock file" in failure["error"] and "home folder" in failure["error"], failure
         assert not denied_path.exists()
         print("Permission failure identifies the lock file and suggests a writable location.")
-        for mode in ("--self-test", "--test-lock-restart"):
+        for mode in ("--self-test", "--self-test-kdbx", "--test-lock-restart"):
             result = subprocess.run([str(stage / "usr/lib/pgpcrypt/pgpcrypt-desktop"), mode],
                                     env=settings, cwd=stage / "usr/lib/pgpcrypt",
                                     capture_output=True, text=True, timeout=60, **child_identity)

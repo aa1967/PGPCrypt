@@ -78,8 +78,8 @@ QPlainTextEdit* editor(const QString& placeholder, bool readonly = false) {
 class Window final : public QMainWindow {
     Q_OBJECT
 public:
-    explicit Window(bool selfTest, const QString& screenshot, bool restartProbe = false)
-        : testing(selfTest), restartTest(restartProbe), screenshotPath(screenshot) {
+    explicit Window(bool selfTest, const QString& screenshot, bool restartProbe = false, bool kdbxProbe = false)
+        : testing(selfTest), restartTest(restartProbe), testKdbx(kdbxProbe), screenshotPath(screenshot) {
         setWindowTitle("PGPCrypt");
         resize(1160, 820);
         process.setProcessChannelMode(QProcess::SeparateChannels);
@@ -149,7 +149,7 @@ private:
     Reply pending;
     quint64 sequence = 0;
     quint64 pendingId = 0;
-    bool unlocked = false, ending = false, testing = false, restartTest = false, notesLoaded = false, creatingVault = false;
+    bool unlocked = false, ending = false, testing = false, restartTest = false, notesLoaded = false, creatingVault = false, testKdbx = false;
     QString screenshotPath;
     QTimer idle;
     QTimer strengthTimer;
@@ -732,6 +732,10 @@ private:
         if(root->currentWidget()!=homePage) { fail("Start screen is missing"); return; }
         showVaultForm(true);
         if(path->text()!=QDir::home().filePath("vault.pgpcrypt.age") || !confirmation->isVisible()) { fail("Create form defaults are missing"); return; }
+        if(testKdbx) {
+            formatChoice->setCurrentIndex(1);
+            if(path->text()!=QDir::home().filePath("vault.kdbx")) { fail("KDBX filename default did not follow format choice"); return; }
+        }
         password->setText("passwordpassword"); updatePasswordStrength();
         if(strengthMeter->value()>1 || unlockButton->isEnabled()) { fail("Weak-password estimate or confirmation requirement failed"); return; }
         password->setText("7q!P2@vz#R9fW4$xD0+K5"); updatePasswordStrength();
@@ -740,12 +744,13 @@ private:
         if(unlockButton->isEnabled()) { fail("Mismatched confirmation was accepted"); return; }
         // The self-test HOME is isolated in main. A relative filename must work
         // even when the installed application starts in a read-only directory.
-        path->setText("vault.pgpcrypt.age");
+        path->setText(testKdbx?"vault.kdbx":"vault.pgpcrypt.age");
         password->setText("disposable Qt fixture passphrase"); confirmation->setText(password->text());
         unlockButton->click();
     }
     void testGenerate() {
-        const QFileInfo created(QDir::home().filePath("vault.pgpcrypt.age"));
+        const QFileInfo created(QDir::home().filePath(testKdbx?"vault.kdbx":"vault.pgpcrypt.age"));
+        if(currentFormat!=(testKdbx?"kdbx":"age")) { fail("Created vault format differs from selection"); return; }
         if(!created.isFile() || created.ownerId()!=static_cast<uint>(geteuid())
             || (created.permissions() & (QFileDevice::ReadGroup | QFileDevice::WriteGroup | QFileDevice::ReadOther | QFileDevice::WriteOther))) {
             fail("Default vault was not created privately in the current user's home"); return;
@@ -791,12 +796,13 @@ private:
 }
 
 int main(int argc,char** argv) {
-    bool child=false,selfTest=false,smoke=false,restartProbe=false;
+    bool child=false,selfTest=false,smoke=false,restartProbe=false,kdbxProbe=false;
     QString screenshot;
     for(int i=1;i<argc;++i) {
         const QByteArray argument(argv[i]);
         if(argument=="--session") child=true;
         if(argument=="--self-test") selfTest=child=true;
+        if(argument=="--self-test-kdbx") selfTest=child=kdbxProbe=true;
         if(argument=="--smoke-ui") smoke=child=true;
         if(argument=="--test-lock-restart") restartProbe=true;
         if(argument=="--screenshot" && i+1<argc) screenshot=QString::fromLocal8Bit(argv[++i]);
@@ -845,7 +851,7 @@ int main(int argc,char** argv) {
     QSettings::setPath(QSettings::IniFormat,QSettings::UserScope,"/dev/null");
     QApplication app(argc,argv);
     app.setApplicationName("PGPCrypt"); app.setQuitOnLastWindowClosed(true);
-    Window window(selfTest,screenshot,restartProbe); window.show();
+    Window window(selfTest,screenshot,restartProbe,kdbxProbe); window.show();
     if(smoke) window.smoke();
     if(selfTest) QTimer::singleShot(60000,&app,[&]{ std::fputs("Qt desktop self-test timed out\n",stderr); app.exit(1); });
     return app.exec();

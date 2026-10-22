@@ -8,7 +8,7 @@ use crate::{
 use anyhow::{Context, Result, bail, ensure};
 use keepass::{
     Database, DatabaseKey,
-    config::{CompressionConfig, KdfConfig},
+    config::{CompressionConfig, DatabaseVersion, KdfConfig},
     db::{Entry, GroupId},
 };
 use quick_xml::{Reader, events::Event};
@@ -361,6 +361,7 @@ pub fn write(
         );
     }
     let mut db = original.cloned().unwrap_or_else(Database::new);
+    db.config.version = DatabaseVersion::KDB4(1);
     db.config.compression_config = CompressionConfig::None;
     if original.is_none() {
         db.config.kdf_config = KdfConfig::Argon2id {
