@@ -1,12 +1,29 @@
 # Validation history
 
-## Alpha7 workflow
+## Alpha7 evidence
 
-Source is pushed before tests. Checks add preference defaults/bounds/conversion,
-subkey creation/use, structured password prompts, Qubes adapter rejection and
-local broker approval/denial, plus both packaged desktop workflows. Actual
-results are recorded after execution; real Qubes transport/host events and
-clipboard/compositor behavior need VM evaluation.
+Functional source `1f9bee2` was pushed before execution. All 24 Rust tests passed
+(17 core, 1 GnuPG interop, 6 worker/lifecycle/adapter checks). New tests covered
+all-off preference defaults, invalid bounds/themes, saved preferences through
+both conversion directions, new signing/encryption subkeys under a protected
+primary, password-request codes, actual signing/decryption using the new subkeys,
+and qrexec operation/domain/privilege rejection without stderr leakage.
+
+Independent Debian age interoperability passed for age schemas 1/2/3/4;
+KeePassXC 2.7.10 protected-field read/edit/save and age conversion passed.
+The packaged age and KDBX Qt workflows passed: two pages only, no default focus
+lock, default signing key restoration, Dark/Solarized palette application,
+local Qubes broker rejection/approval and dom0-crypto denial, broker disable,
+on-demand protected-key passwords, crypto/retained notes and lock/restart.
+The Solarized Notepad layout was visually reviewed offscreen.
+
+The four packaged binaries passed ELF/dependency/no-RPATH checks. RPC handlers
+were present and no dom0 policy was installed. Permission guidance, ownership,
+formatting, Clippy and C++ warnings-as-errors passed. No system installation was
+performed. Native clipboard/compositor behavior, real Qubes policy/inter-qube
+transport/host events, host-hook deployment and an independent security audit
+remain untested in this cloud environment. Local broker tests are not a claim
+of real-Qubes certification.
 
 ## Alpha6 evidence
 

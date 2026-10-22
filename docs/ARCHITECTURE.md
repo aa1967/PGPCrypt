@@ -90,3 +90,17 @@ a new encrypted destination without modifying the source. See
 `src/qubes.rs` defines a strict future remote decoder, separate from the local
 worker request type. No RPC bridge is installed. See [QUBES.md](QUBES.md) for
 StandaloneVM deployment and the remaining authenticated broker/policy work.
+
+## Alpha7 settings, subkeys and Qubes broker
+
+The GUI exposes an optional same-user Unix socket broker only while unlocked
+and explicitly enabled in encrypted preferences. The qrexec adapter validates
+a separate sign/decrypt allowlist and authenticated environment identity; local
+GUI approval and on-demand key-password entry precede worker requests. A dom0
+lock-only service is separately gated. The worker still has no listening socket.
+See QUBES.md for guest trust boundaries, policy and real-VM validation needs.
+
+Preferences (all automatic modes off initially) live in age payload schema 4
+or KDBX settings schema 3. Subkey creation uses Sequoia KeyBuilder/SubkeyBuilder
+and the primary secret to certify a binding, then commits a new ciphertext
+snapshot. The removed notes page retains existing data in both backends.
