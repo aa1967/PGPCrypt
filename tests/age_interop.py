@@ -87,14 +87,19 @@ def main():
         external = directory / "go.pgpcrypt.age"
         peer = Peer()
         peer.request("create", path=str(original), password=PASS)
-        peer.request("generate", text="Age interop fixture <age@example.invalid>")
+        peer.request("generate", password="disposable age key passphrase", key_options={
+            "name": "Age interop fixture", "email": "age@example.invalid",
+            "algorithm": "cv25519", "layout": "subkeys", "signing": True,
+            "certification": True, "transport_encryption": True,
+            "storage_encryption": True, "expires_at": None,
+        })
         fingerprint = peer.request("list")["keys"][0]["fingerprint"]
         peer.request("notes_set", text="independent age compatibility fixture")
         peer.lock()
 
         terminal_command([age, "--decrypt", "--output", str(plaintext), str(original)])
         decoded = json.loads(plaintext.read_text())
-        assert decoded["application"] == "PGPCrypt" and decoded["schema"] == 1
+        assert decoded["application"] == "PGPCrypt" and decoded["schema"] == 2
         assert decoded["data"]["notes"] == "independent age compatibility fixture"
         assert len(decoded["data"]["certificates"]) == 1
 

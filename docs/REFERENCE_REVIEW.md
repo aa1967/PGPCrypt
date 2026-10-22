@@ -73,7 +73,8 @@ the default persistent GnuPG home would defeat that requirement.
 2. **Rust worker** for vault custody and Sequoia operations. The GUI receives
    metadata, public exports, and results, never stored/generated secret keys.
    Pasting a private-key import is an explicit exception: the GUI sees those
-   bytes before forwarding them. There is no private-key export protocol operation.
+   bytes before forwarding them. Private export now requires already encrypted secret packets and explicit
+   user confirmation.
 3. **Process replacement on lock.** Confirm worker termination, exit the unlocked
    UI, and let a supervisor holding no vault data start a fresh locked UI. Linux
    parent-death signals prevent orphaned workers. This is lifecycle isolation,

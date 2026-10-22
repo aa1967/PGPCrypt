@@ -3,7 +3,12 @@
 #include <QClipboard>
 #include <QCloseEvent>
 #include <QCoreApplication>
+#include <QComboBox>
+#include <QDateTimeEdit>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QDBusConnection>
 #include <QDBusInterface>
 #include <QDBusObjectPath>
@@ -32,6 +37,7 @@
 #include <QTableWidget>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QTimeZone>
 #include <QToolBar>
 #include <QVBoxLayout>
 #include <functional>
@@ -96,11 +102,11 @@ public:
         idle.start();
         connect(&idle, &QTimer::timeout, this, [this] {
             const auto now = QDateTime::currentMSecsSinceEpoch();
-            if (unlocked && (now - lastActivity >= 300000 || now - lastTick > 15000)) endSession(true);
+            if (unlocked && (activityClock.elapsed() >= idleTimeoutSeconds * 1000LL || now - lastTick > 15000 || now < lastTick)) endSession(true);
             lastTick = now;
         });
         idle.setInterval(1000);
-        lastActivity = lastTick = QDateTime::currentMSecsSinceEpoch();
+        lastTick = QDateTime::currentMSecsSinceEpoch();
         qApp->installEventFilter(this);
         wireSessionSignals();
         if (testing) QTimer::singleShot(100, this, [this] { testCreate(); });
@@ -122,7 +128,7 @@ public slots:
 protected:
     bool eventFilter(QObject* object, QEvent* event) override {
         if (event->type() == QEvent::KeyPress || event->type() == QEvent::MouseButtonPress || event->type() == QEvent::MouseMove)
-            lastActivity = QDateTime::currentMSecsSinceEpoch();
+            activityClock.restart();
         if (!testing && unlocked && event->type() == QEvent::ApplicationDeactivate) endSession(true);
         return QMainWindow::eventFilter(object, event);
     }
@@ -141,11 +147,15 @@ private:
     QString screenshotPath;
     QTemporaryDir testDirectory;
     QTimer idle;
-    qint64 lastActivity = 0, lastTick = 0;
+    QElapsedTimer activityClock;
+    int idleTimeoutSeconds = 300;
+    qint64 lastTick = 0;
     QStackedWidget *root = nullptr;
     QWidget *sessionPage = nullptr, *lockedPage = nullptr;
-    QLineEdit *path = nullptr, *password = nullptr, *confirmation = nullptr, *identity = nullptr, *search = nullptr, *keyPassword = nullptr;
+    QLineEdit *path = nullptr, *password = nullptr, *confirmation = nullptr, *search = nullptr, *keyPassword = nullptr;
     QCheckBox* create = nullptr;
+    QComboBox* timeoutChoice = nullptr;
+    QLabel* sessionWarning = nullptr;
     QPushButton* unlockButton = nullptr;
     QLabel *lockedStatus = nullptr, *details = nullptr, *selectionSummary = nullptr;
     QTableWidget* keys = nullptr;
@@ -259,11 +269,12 @@ private:
             QJsonObject fields{{"path",path->text()},{"password",password->text()}};
             const auto op = create->isChecked() ? "create" : "open";
             password->clear(); confirmation->clear();
-            request(op,fields,[this](bool ok,const QJsonObject&) {
+            request(op,fields,[this](bool ok,const QJsonObject& data) {
                 if (!ok) return;
                 unlocked = true; lockAction->setEnabled(true); root->setCurrentWidget(sessionPage);
+                applyTimeout(data.value("idle_timeout_seconds").toInt(300));
                 path->clear(); lockedStatus->clear();
-                lastActivity = QDateTime::currentMSecsSinceEpoch();
+                activityClock.restart();
                 refreshKeys([this] { if (testing) testGenerate(); });
             });
         });
@@ -283,6 +294,20 @@ private:
         auto* lock = new QPushButton("Lock vault  Ctrl+L"); heading->addWidget(lock);
         connect(lock,&QPushButton::clicked,this,[this] { endSession(true); });
         layout->addLayout(heading);
+        auto* timeoutRow = new QHBoxLayout;
+        timeoutRow->addWidget(new QLabel("Lock after inactivity:"));
+        timeoutChoice = new QComboBox;
+        for (int minutes : {1,2,5,10,15,30,60}) timeoutChoice->addItem(QString::number(minutes)+" minutes",minutes*60);
+        timeoutChoice->setCurrentIndex(2);
+        timeoutRow->addWidget(timeoutChoice); timeoutRow->addStretch();
+        auto* saveTimeout = new QPushButton("Save timeout"); timeoutRow->addWidget(saveTimeout);
+        connect(saveTimeout,&QPushButton::clicked,this,[this] {
+            request("settings_set",{{"idle_timeout_seconds",timeoutChoice->currentData().toInt()}},[this](bool ok,const QJsonObject& data) {
+                if(ok) { applyTimeout(data.value("idle_timeout_seconds").toInt()); statusBar()->showMessage("Vault timeout saved"); }
+                else timeoutChoice->setCurrentIndex(timeoutChoice->findData(idleTimeoutSeconds));
+            });
+        });
+        layout->addLayout(timeoutRow);
         auto* split = new QSplitter;
         auto* navigation = new QListWidget; navigation->addItems({"Keys & identities","Text workspace","Encrypted notes"}); navigation->setMaximumWidth(185);
         split->addWidget(navigation);
@@ -298,9 +323,20 @@ private:
         });
         navigation->setCurrentRow(0);
         layout->addWidget(split);
-        auto* warning = new QLabel("Unlocked • Locks on focus loss, desktop lock, suspend or 5 minutes idle. Lock discards unsaved text and restarts this session.");
-        warning->setWordWrap(true); layout->addWidget(warning);
+        sessionWarning = new QLabel;
+        sessionWarning->setWordWrap(true); layout->addWidget(sessionWarning);
+        applyTimeout(300);
         root->addWidget(sessionPage);
+    }
+
+    void applyTimeout(int seconds) {
+        idleTimeoutSeconds = qBound(60,seconds,3600);
+        if(timeoutChoice) {
+            int index=timeoutChoice->findData(idleTimeoutSeconds);
+            if(index<0) { timeoutChoice->addItem(QString::number(idleTimeoutSeconds)+" seconds",idleTimeoutSeconds); index=timeoutChoice->count()-1; }
+            timeoutChoice->setCurrentIndex(index);
+        }
+        if(sessionWarning) sessionWarning->setText("Locks on focus loss, desktop lock, suspend or "+QString::number(idleTimeoutSeconds/60)+" minutes idle. Lock discards unsaved text and restarts this session.");
     }
 
     void buildKeys() {
@@ -317,7 +353,7 @@ private:
         details = new QLabel("Select a key to inspect its full fingerprint."); details->setTextFormat(Qt::PlainText); details->setTextInteractionFlags(Qt::TextSelectableByMouse); details->setWordWrap(true); layout->addWidget(details);
         connect(keys,&QTableWidget::itemSelectionChanged,this,[this] {
             const int row=keys->currentRow(); if(row<0) return;
-            details->setText(keys->item(row,1)->text()+"\n"+keys->item(row,4)->text()+"\nCheck this fingerprint through an independent channel.");
+            details->setText(keys->item(row,1)->text()+"\n"+keys->item(row,4)->text()+"\n"+keys->item(row,4)->data(Qt::UserRole+2).toString()+"\nCheck this fingerprint through an independent channel.");
         });
         connect(keys,&QTableWidget::itemChanged,this,[this](QTableWidgetItem* item) {
             if(item->column()==0 && selectionSummary) updateSelection();
@@ -331,12 +367,26 @@ private:
             request("public_export",{{"fingerprint",keys->item(row,4)->text()}},[this](bool ok,const QJsonObject& data) { if(ok) { output->setPlainText(data.value("text").toString()); tabs->setCurrentIndex(1); statusBar()->showMessage("Public export: publishing it exposes its identities"); } });
         });
         layout->addLayout(actions);
+        auto* backupActions = new QHBoxLayout;
+        auto* privateExport = new QPushButton("Show protected private key"); backupActions->addWidget(privateExport);
+        connect(privateExport,&QPushButton::clicked,this,[this] {
+            if(QMessageBox::question(this,"Export private key","Display the passphrase-protected private key for backup? Copying it puts it outside this vault's protection.") == QMessageBox::Yes)
+                exportSelected("protected_private_export");
+        });
+        auto* revocation = new QPushButton("Show revocation certificate"); backupActions->addWidget(revocation);
+        connect(revocation,&QPushButton::clicked,this,[this] {
+            if(QMessageBox::question(this,"Revocation certificate","Anyone with this certificate can revoke your key. Keep an offline backup. Creating or displaying it does not revoke the key.") == QMessageBox::Yes)
+                exportSelected("revocation_export");
+        });
+        auto* protect = new QPushButton("Protect / change key passphrase…"); backupActions->addWidget(protect);
+        connect(protect,&QPushButton::clicked,this,[this] { protectKeyDialog(); });
+        layout->addLayout(backupActions);
         auto* lower = new QTabWidget;
         auto* generatePage = new QWidget; auto* generateLayout = new QVBoxLayout(generatePage);
-        identity = new QLineEdit; identity->setPlaceholderText("Name or pseudonym <optional@email>"); generateLayout->addWidget(identity);
-        generateLayout->addWidget(new QLabel("Ed25519 / Cv25519 • GnuPG-compatible • Protected by the vault passphrase"));
-        auto* generate = new QPushButton("Generate and save key"); generateLayout->addWidget(generate); generateLayout->addStretch();
-        connect(generate,&QPushButton::clicked,this,[this] { request("generate",{{"text",identity->text()}},[this](bool ok,const QJsonObject&) { if(ok) { identity->clear(); refreshKeys(); } }); });
+        auto* description = new QLabel("Create an OpenPGP identity with an optional email/comment, expiry, capabilities and a separate private-key passphrase. An emergency revocation certificate is saved inside the vault.");
+        description->setWordWrap(true); generateLayout->addWidget(description);
+        auto* generate = new QPushButton("Create key…"); generateLayout->addWidget(generate); generateLayout->addStretch();
+        connect(generate,&QPushButton::clicked,this,[this] { createKeyDialog(); });
         lower->addTab(generatePage,"New identity");
         auto* importPage = new QWidget; auto* importLayout = new QVBoxLayout(importPage);
         importText=editor("Paste one armored public or private key…"); importLayout->addWidget(importText);
@@ -344,6 +394,92 @@ private:
         connect(importButton,&QPushButton::clicked,this,[this] { request("import",{{"text",importText->toPlainText()}},[this](bool ok,const QJsonObject&) { if(ok) { importText->clear(); refreshKeys(); } }); });
         lower->addTab(importPage,"Import key"); layout->addWidget(lower,1);
         tabs->addTab(page,"Keys");
+    }
+
+    void exportSelected(const QString& operation) {
+        const int row=keys->currentRow(); if(row<0) { fail("Select a key"); return; }
+        QJsonObject fields{{"fingerprint",keys->item(row,4)->text()}};
+        // Imported keys need their primary-key password only if no saved ticket
+        // exists. Keep password entry on the normal text workspace.
+        fields.insert("password",keyPassword->text()); keyPassword->clear();
+        request(operation,fields,[this,operation](bool ok,const QJsonObject& data) {
+            if(ok) {
+                output->setPlainText(data.value("text").toString()); tabs->setCurrentIndex(1);
+                statusBar()->showMessage(operation=="revocation_export"?"Revocation certificate: back up privately; do not publish until revoking.":"Private export: encrypted with the key passphrase, independently of the vault.");
+            }
+        });
+    }
+
+    void createKeyDialog() {
+        QDialog dialog(this); dialog.setWindowTitle("Create OpenPGP key"); dialog.setMinimumWidth(560);
+        auto* layout=new QVBoxLayout(&dialog); auto* form=new QFormLayout;
+        auto* name=new QLineEdit; auto* email=new QLineEdit; auto* comment=new QLineEdit;
+        name->setMaxLength(128); email->setMaxLength(254); comment->setMaxLength(256);
+        form->addRow("Name or pseudonym",name); form->addRow("Email (optional)",email); form->addRow("Public comment (optional)",comment);
+        auto* disclosure=new QLabel("Email and comment are included in public-key exports. Use encrypted vault notes for private information."); disclosure->setWordWrap(true); form->addRow(disclosure);
+        auto* algorithm=new QComboBox;
+        algorithm->addItem("Ed25519 / Cv25519 (recommended)","cv25519");
+        algorithm->addItem("RSA 2048-bit","rsa2048"); algorithm->addItem("RSA 3072-bit","rsa3072"); algorithm->addItem("RSA 4096-bit","rsa4096");
+        algorithm->addItem("ECDSA / ECDH NIST P-256","p256"); algorithm->addItem("ECDSA / ECDH NIST P-384","p384"); algorithm->addItem("ECDSA / ECDH NIST P-521","p521");
+        form->addRow("Algorithm",algorithm);
+        auto* keyLayout=new QComboBox; keyLayout->addItem("Primary key + separate signing/encryption subkeys","subkeys"); keyLayout->addItem("Single RSA key with selected capabilities","single"); keyLayout->setEnabled(false); form->addRow("Key layout",keyLayout);
+        auto* certify=new QCheckBox("Certification (primary key)"); certify->setChecked(true); certify->setEnabled(false);
+        auto* signing=new QCheckBox("Sign"); signing->setChecked(true);
+        auto* transport=new QCheckBox("Encrypt communications"); transport->setChecked(true);
+        auto* storage=new QCheckBox("Encrypt storage"); storage->setChecked(true);
+        auto* authentication=new QCheckBox("Authentication");
+        form->addRow("Capabilities",certify); form->addRow(signing); form->addRow(transport); form->addRow(storage); form->addRow(authentication);
+        auto updateLayout=[=] {
+            const bool rsa=algorithm->currentData().toString().startsWith("rsa");
+            keyLayout->setEnabled(rsa); if(!rsa) keyLayout->setCurrentIndex(0);
+            const bool subkeys=keyLayout->currentData().toString()=="subkeys";
+            certify->setEnabled(!subkeys); if(subkeys) certify->setChecked(true);
+        };
+        connect(algorithm,&QComboBox::currentIndexChanged,&dialog,updateLayout); connect(keyLayout,&QComboBox::currentIndexChanged,&dialog,updateLayout);
+        auto* expire=new QCheckBox("Expire on"); expire->setChecked(true);
+        auto* date=new QDateTimeEdit(QDateTime::currentDateTimeUtc().addYears(2)); date->setCalendarPopup(true); date->setDisplayFormat("yyyy-MM-dd HH:mm 'UTC'");
+        connect(expire,&QCheckBox::toggled,date,&QWidget::setEnabled); form->addRow(expire,date);
+        auto* pass=new QLineEdit; auto* confirm=new QLineEdit;
+        for(auto* field : {pass,confirm}) { field->setEchoMode(QLineEdit::Password); field->setInputMethodHints(Qt::ImhSensitiveData | Qt::ImhNoPredictiveText | Qt::ImhNoAutoUppercase); }
+        form->addRow("Private-key passphrase",pass); form->addRow("Confirm passphrase",confirm);
+        layout->addLayout(form);
+        auto* hint=new QLabel("At least 16 characters. This password protects exported private keys too. RSA-1024 and DSA/ElGamal creation are unavailable; import legacy keys instead."); hint->setWordWrap(true); layout->addWidget(hint);
+        auto* error=new QLabel; error->setTextFormat(Qt::PlainText); error->setWordWrap(true); layout->addWidget(error);
+        auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel); layout->addWidget(buttons);
+        connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+        connect(buttons,&QDialogButtonBox::accepted,&dialog,[=,&dialog] {
+            if(name->text().trimmed().isEmpty()) { error->setText("Enter a name or pseudonym."); return; }
+            if(pass->text().toUcs4().size()<16 || pass->text()!=confirm->text()) { error->setText("Use at least 16 characters and matching passphrases."); return; }
+            if(!certify->isChecked() && !signing->isChecked() && !transport->isChecked() && !storage->isChecked() && !authentication->isChecked()) { error->setText("Select at least one capability."); return; }
+            if(expire->isChecked() && date->dateTime() <= QDateTime::currentDateTimeUtc().addSecs(60)) { error->setText("Choose an expiry at least one minute in the future."); return; }
+            dialog.accept();
+        });
+        if(dialog.exec()!=QDialog::Accepted) { pass->clear(); confirm->clear(); return; }
+        QJsonObject options{{"name",name->text()},{"email",email->text()},{"comment",comment->text()},{"algorithm",algorithm->currentData().toString()},{"layout",keyLayout->currentData().toString()},
+            {"certification",certify->isChecked()},{"signing",signing->isChecked()},{"transport_encryption",transport->isChecked()},{"storage_encryption",storage->isChecked()},{"authentication",authentication->isChecked()},
+            {"expires_at",expire->isChecked()?QJsonValue(date->dateTime().toSecsSinceEpoch()):QJsonValue(QJsonValue::Null)}};
+        QJsonObject fields{{"key_options",options},{"password",pass->text()}}; pass->clear(); confirm->clear();
+        request("generate",fields,[this](bool ok,const QJsonObject&) { if(ok) { refreshKeys(); statusBar()->showMessage("Key and emergency revocation certificate saved inside encrypted vault"); } });
+    }
+
+    void protectKeyDialog() {
+        const int row=keys->currentRow(); if(row<0) { fail("Select a private key"); return; }
+        const QString fingerprint=keys->item(row,4)->text();
+        QDialog dialog(this); dialog.setWindowTitle("Protect private key"); auto* form=new QFormLayout(&dialog);
+        auto* current=new QLineEdit; auto* pass=new QLineEdit; auto* confirm=new QLineEdit;
+        for(auto* field : {current,pass,confirm}) { field->setEchoMode(QLineEdit::Password); field->setInputMethodHints(Qt::ImhSensitiveData | Qt::ImhNoPredictiveText | Qt::ImhNoAutoUppercase); }
+        form->addRow("Current passphrase (if protected)",current); form->addRow("New passphrase (16+ characters)",pass); form->addRow("Confirm new passphrase",confirm);
+        auto* error=new QLabel; error->setTextFormat(Qt::PlainText); form->addRow(error);
+        auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel); form->addRow(buttons);
+        connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
+        connect(buttons,&QDialogButtonBox::accepted,&dialog,[=,&dialog] {
+            if(pass->text().toUcs4().size()<16 || pass->text()!=confirm->text()) { error->setText("Use at least 16 characters and matching passphrases."); return; }
+            dialog.accept();
+        });
+        if(dialog.exec()!=QDialog::Accepted) { current->clear(); pass->clear(); confirm->clear(); return; }
+        QJsonObject fields{{"fingerprint",fingerprint},{"password",current->text()},{"new_password",pass->text()}};
+        current->clear(); pass->clear(); confirm->clear();
+        request("protect_private_key",fields,[this](bool ok,const QJsonObject&) { if(ok) { refreshKeys(); statusBar()->showMessage("Private-key passphrase updated. Old exports and backups retain their previous protection."); } });
     }
 
     void refreshKeys(std::function<void()> after = {}) {
@@ -360,7 +496,11 @@ private:
                 keys->setItem(row,1,new QTableWidgetItem(identities.join("; ")));
                 keys->setItem(row,2,new QTableWidgetItem(key.value("has_secret").toBool()?"Public + private":"Public only"));
                 keys->setItem(row,3,new QTableWidgetItem(key.value("status").toString()));
-                auto* fingerprint=new QTableWidgetItem(key.value("fingerprint").toString()); fingerprint->setData(Qt::UserRole+1,key.value("can_sign").toBool()); keys->setItem(row,4,fingerprint);
+                auto* fingerprint=new QTableWidgetItem(key.value("fingerprint").toString()); fingerprint->setData(Qt::UserRole+1,key.value("can_sign").toBool());
+                QStringList capabilities; for(const auto& value:key.value("capabilities").toArray()) capabilities.append(value.toString());
+                const auto expires=key.value("expires_at");
+                fingerprint->setData(Qt::UserRole+2,key.value("algorithm").toString()+" • Expires: "+(expires.isNull()?QString("never"):QDateTime::fromSecsSinceEpoch(expires.toInteger(),QTimeZone::UTC).toString(Qt::ISODate))+"\nCapabilities: "+capabilities.join("; "));
+                keys->setItem(row,4,fingerprint);
             }
             if(after) after();
         });
@@ -372,7 +512,7 @@ private:
         selectionSummary=new QLabel; selectionSummary->setTextFormat(Qt::PlainText); selectionSummary->setWordWrap(true); layout->addWidget(selectionSummary);
         input=editor("Paste plaintext or an armored OpenPGP message…"); output=editor("Result appears here after authentication succeeds.",true);
         auto* panes=new QSplitter(Qt::Vertical); panes->addWidget(input); panes->addWidget(output); layout->addWidget(panes,1);
-        keyPassword=new QLineEdit; keyPassword->setEchoMode(QLineEdit::Password); keyPassword->setPlaceholderText("Inner key passphrase, only if an imported key requires one"); keyPassword->setInputMethodHints(Qt::ImhSensitiveData | Qt::ImhNoPredictiveText); layout->addWidget(keyPassword);
+        keyPassword=new QLineEdit; keyPassword->setEchoMode(QLineEdit::Password); keyPassword->setPlaceholderText("Private-key passphrase for signing, decryption, or an imported key's revocation certificate"); keyPassword->setInputMethodHints(Qt::ImhSensitiveData | Qt::ImhNoPredictiveText); layout->addWidget(keyPassword);
         auto* actions=new QHBoxLayout;
         for(const auto& name:QStringList{"Encrypt","Decrypt","Sign","Verify"}) {
             auto* button=new QPushButton(name); actions->addWidget(button);
@@ -428,7 +568,8 @@ private:
         unlockButton->click();
     }
     void testGenerate() {
-        request("generate",{{"text","Desktop fixture <fixture@example.invalid>"}},[this](bool ok,const QJsonObject&) {
+        QJsonObject options{{"name","Desktop fixture"},{"email","fixture@example.invalid"},{"algorithm","cv25519"},{"layout","subkeys"},{"signing",true},{"certification",true},{"transport_encryption",true},{"storage_encryption",true},{"expires_at",QJsonValue(QJsonValue::Null)}};
+        request("generate",{{"key_options",options},{"password","disposable Qt key passphrase"}},[this](bool ok,const QJsonObject&) {
             if(!ok) return;
             refreshKeys([this] {
                 if(keys->rowCount()!=1) { fail("Key table did not populate"); return; }
@@ -437,9 +578,11 @@ private:
                 tabs->setCurrentIndex(1); input->setPlainText("Qt desktop private fixture");
                 textAction("encrypt",[this] {
                     input->setPlainText(output->toPlainText());
+                    keyPassword->setText("disposable Qt key passphrase");
                     textAction("decrypt",[this] {
                         if(output->toPlainText()!="Qt desktop private fixture") { fail("Decryption mismatch"); return; }
                         input->setPlainText("Qt signature fixture");
+                        keyPassword->setText("disposable Qt key passphrase");
                         textAction("sign",[this] {
                             input->setPlainText(output->toPlainText());
                             textAction("verify",[this] {

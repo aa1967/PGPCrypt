@@ -5,7 +5,7 @@
 ```sh
 cd ~/Downloads
 sudo apt update
-sudo apt install ./pgpcrypt_0.1.0~alpha2_amd64.deb
+sudo apt install ./pgpcrypt_0.1.0.alpha3_amd64.deb
 pgpcrypt
 ```
 
@@ -19,26 +19,22 @@ A public APT repository is not required for local `.deb` installation.
 
 ## Source build with Debian-packaged tools
 
-After the implementation has been pushed to GitHub:
-
 ```sh
 sudo apt update
 sudo apt install -y git ca-certificates
-git clone https://github.com/aa1967/PGPCrypt.git
+git clone --branch v0.1.0-alpha3 https://github.com/aa1967/PGPCrypt.git
 cd PGPCrypt
 ./scripts/install-debian.sh --build
 pgpcrypt
 ```
 
-The script installs build tools using APT and builds/installs the package. The
-fully expanded package list and commands are in README.md. Rust 1.85.1 from
-Debian 13 is supported and tested. No separate toolchain website is used.
+The script installs build tools using APT and builds/installs the package. Rust 1.85.1 from Debian 13 is supported. No separate toolchain website is used.
 
 To build without installing:
 
 ```sh
 ./scripts/build-deb.sh
-python3 scripts/check-deb.py dist/pgpcrypt_0.1.0~alpha2_amd64.deb
+python3 scripts/check-deb.py dist/pgpcrypt_0.1.0.alpha3_amd64.deb
 ```
 
 ## Reproducibility and validation limits

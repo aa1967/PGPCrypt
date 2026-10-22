@@ -61,6 +61,7 @@ fn worker_vault_workflow_and_private_key_boundary() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("worker.pgpvault");
     let password = "disposable protocol passphrase";
+    let key_password = "disposable private key passphrase";
     let mut peer = Peer::new()?;
     assert_eq!(peer.ok("status", json!({}))?["unlocked"], false);
     for op in ["list", "notes_get", "public_export", "generate"] {
@@ -73,7 +74,11 @@ fn worker_vault_workflow_and_private_key_boundary() -> Result<()> {
     );
     peer.ok(
         "generate",
-        json!({"text":"Protocol fixture <protocol@example.invalid>"}),
+        json!({"password":key_password,"key_options":{
+            "name":"Protocol fixture","email":"protocol@example.invalid","comment":"Disposable fixture",
+            "algorithm":"cv25519","layout":"subkeys","signing":true,"certification":true,
+            "transport_encryption":true,"storage_encryption":true,"expires_at":null
+        }}),
     )?;
     let list = peer.ok("list", json!({}))?;
     let fp = list["keys"][0]["fingerprint"].as_str().unwrap().to_owned();
@@ -101,17 +106,68 @@ fn worker_vault_workflow_and_private_key_boundary() -> Result<()> {
         "encrypt",
         json!({"text":"worker private message","recipients":[fp]}),
     )?;
-    let decrypted = peer.ok("decrypt", json!({"text":encrypted["text"]}))?;
+    let decrypted = peer.ok(
+        "decrypt",
+        json!({"text":encrypted["text"],"password":key_password}),
+    )?;
     assert_eq!(decrypted["text"], "worker private message");
     let signed = peer.ok(
         "sign",
-        json!({"text":"worker signed message","fingerprint":fp}),
+        json!({"text":"worker signed message","fingerprint":fp,"password":key_password}),
     )?;
     let verified = peer.ok("verify", json!({"text":signed["text"]}))?;
     assert_eq!(verified["text"], "worker signed message");
     assert_eq!(verified["signers"], json!([fp]));
     peer.ok("notes_set", json!({"text":"persisted protocol note"}))?;
     assert_eq!(peer.raw("private_export", json!({}))?["ok"], false);
+    let exported = peer.ok("protected_private_export", json!({"fingerprint":fp}))?;
+    let private = pgp::parse(exported["text"].as_str().unwrap().as_bytes())?;
+    assert!(
+        private
+            .keys()
+            .secret()
+            .all(|ka| ka.key().secret().is_encrypted())
+    );
+    let ticket = peer.ok("revocation_export", json!({"fingerprint":fp}))?;
+    assert!(
+        ticket["text"]
+            .as_str()
+            .unwrap()
+            .contains("BEGIN PGP PUBLIC KEY BLOCK")
+    );
+    assert_eq!(
+        peer.ok("list", json!({}))?["keys"][0]["status"],
+        "Valid",
+        "Exporting a ticket must not revoke a key"
+    );
+    assert_eq!(
+        peer.raw("settings_set", json!({"idle_timeout_seconds":0}))?["ok"],
+        false
+    );
+    peer.ok("settings_set", json!({"idle_timeout_seconds":60}))?;
+    let new_key_password = "replacement private key passphrase";
+    assert_eq!(
+        peer.raw(
+            "protect_private_key",
+            json!({"fingerprint":fp,"password":"wrong","new_password":new_key_password})
+        )?["ok"],
+        false
+    );
+    peer.ok(
+        "protect_private_key",
+        json!({"fingerprint":fp,"password":key_password,"new_password":new_key_password}),
+    )?;
+    assert_eq!(
+        peer.raw(
+            "sign",
+            json!({"text":"fixture","fingerprint":fp,"password":key_password})
+        )?["ok"],
+        false
+    );
+    peer.ok(
+        "sign",
+        json!({"text":"fixture","fingerprint":fp,"password":new_key_password}),
+    )?;
     peer.ok("lock", json!({}))?;
     assert!(
         peer.child.wait()?.success(),
@@ -122,7 +178,10 @@ fn worker_vault_workflow_and_private_key_boundary() -> Result<()> {
         peer.raw("open", json!({"path":path,"password":"wrong"}))?["ok"],
         false
     );
-    peer.ok("open", json!({"path":path,"password":password}))?;
+    assert_eq!(
+        peer.ok("open", json!({"path":path,"password":password}))?["idle_timeout_seconds"],
+        60
+    );
     assert_eq!(
         peer.ok("notes_get", json!({}))?["text"],
         "persisted protocol note"

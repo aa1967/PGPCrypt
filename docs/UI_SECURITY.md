@@ -10,7 +10,8 @@ The supervisor has no widgets, passphrases, vault paths, or contents. It starts
 a session UI, which starts a Rust worker through private stdin/stdout pipes.
 Passwords are never command-line arguments. The worker owns the unlocked vault
 and runs crypto. It returns selected metadata, public exports, notes, and
-operation results. There is no stored-private-key export API. Pasted private-key
+operation results. Private-key export is an explicit user action and requires every secret packet
+to be passphrase encrypted. Revocation exports require an explicit confirmation. Pasted private-key
 imports necessarily pass through GUI text and IPC buffers; this exception must
 not be mistaken for worker-only private-key custody.
 

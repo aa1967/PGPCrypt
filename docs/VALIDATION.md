@@ -1,4 +1,14 @@
-# Validation evidence for alpha2
+# Validation history
+
+## Alpha3 workflow
+
+At the user's request, tests are not run locally before committing or pushing.
+Alpha3 source tests, interoperability checks and package checks are configured
+to run on GitHub after the push. The older results below do not validate alpha3
+key options, passphrase changes, revocation export, schema 2 or timeout controls.
+Compilation/package production is not a functional test.
+
+## Alpha2 evidence
 
 Build target: Debian 13 amd64. The source compiles with **Debian's packaged
 Rust/Cargo 1.85.1**, extracted rootlessly for this cloud machine. No rustup or
@@ -19,7 +29,7 @@ website-supplied toolchain is required by the documented installation paths.
 | Debian package | Compiled UI/worker/converter, menu/icon, dependencies and source/license notices; no Rust/Cargo runtime dependency. |
 | Archive check | ELF dependencies resolve, no RPATH/RUNPATH, assets validate, packaged workflow/restart checks pass. |
 
-Commands are in README.md. CI configuration is prepared for GitHub but has not
+The current CI commands are in `.github/workflows/debian.yml`. CI configuration is prepared for GitHub but has not
 been run on GitHub by this task. Local results do not establish a public release.
 
 Still unrun: a clean Debian VM system install/removal, real GNOME/Plasma lock/

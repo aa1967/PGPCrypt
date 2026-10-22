@@ -1,0 +1,31 @@
+name: Release checksums
+on:
+  # Bootstrap the repair for the already published alpha3 package. Subsequent
+  # releases generate the safe filename and checksum together in build-deb.sh.
+  push:
+    branches: [pgpcrypt-alpha3]
+    paths: ['.github/workflows/release-checksums.yml']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag whose checksums should be regenerated
+        required: true
+        default: v0.1.0-alpha3
+permissions:
+  contents: write
+jobs:
+  checksums:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Regenerate checksums from actual uploaded asset names
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || 'v0.1.0-alpha3' }}
+        run: |
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.deb' --dir assets
+          (cd assets && sha256sum -- *.deb > SHA256SUMS)
+          gh release upload "$RELEASE_TAG" assets/SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
+          if [ "$RELEASE_TAG" = v0.1.0-alpha3 ]; then
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --notes-file docs/releases/0.1.0-alpha3.md
+          fi
