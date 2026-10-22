@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=PGPCrypt (Experimental)
+Comment=Encrypted OpenPGP vault and private text workspace
+Exec=/usr/bin/pgpcrypt
+Icon=pgpcrypt
+Terminal=false
+Categories=Utility;
+Keywords=PGP;OpenPGP;GPG;Encryption;Vault;
+StartupNotify=true
