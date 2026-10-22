@@ -7,3 +7,5 @@
 !tests/fixtures/legacy-alpha1.pgpvault
 *.kdbx
 *.kdbx.lock
+__pycache__/
+*.pyc

@@ -14,7 +14,7 @@ The maintained library performs all cryptographic operations. No new cipher,
 KDF or encryption framing is defined by PGPCrypt. Saves regenerate salts and
 keys, retaining the supported KDF settings of existing databases. The application checks the public container framing before invoking it.
 
-The first read/write profile accepts KDBX 4.1, AES-256, Argon2id v1.3, no
+The first read/write profile accepts KDBX 4.0 and 4.1, AES-256, Argon2id v1.3, no
 compression, a 32-byte salt, 64–256 MiB memory, 1–10 iterations and 1–4 lanes.
 Files and authenticated XML are bounded to 16 MiB; XML nesting is limited to 32.
 Unknown header/XML fields, XML doctypes, attachments, custom icons, compressed

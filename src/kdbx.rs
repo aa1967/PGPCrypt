@@ -41,8 +41,8 @@ pub fn preflight(bytes: &[u8]) -> Result<()> {
     ensure!(bytes.starts_with(MAGIC), "Not a KDBX vault");
     let mut input = bytes.get(8..).context("Truncated KDBX")?;
     ensure!(
-        take(&mut input, 4)? == [1, 0, 4, 0],
-        "Only KDBX 4.1 is supported"
+        matches!(take(&mut input, 4)?, [0 | 1, 0, 4, 0]),
+        "Only KDBX 4.0 and 4.1 are supported"
     );
     let mut fields = HashMap::new();
     loop {
@@ -165,7 +165,7 @@ fn validate_xml(xml: &[u8]) -> Result<()> {
                     "KeePassFile" => "Meta Root",
                     "Root" => "Group DeletedObjects",
                     "Meta" => {
-                        "Generator DatabaseName DatabaseNameChanged DatabaseDescription DatabaseDescriptionChanged DefaultUserName DefaultUserNameChanged MaintenanceHistoryDays Color MasterKeyChanged MasterKeyChangeRec MasterKeyChangeForce MemoryProtection RecycleBinEnabled RecycleBinUUID RecycleBinChanged EntryTemplatesGroup EntryTemplatesGroupChanged LastSelectedGroup LastTopVisibleGroup HistoryMaxItems HistoryMaxSize SettingsChanged CustomData"
+                        "Generator DatabaseName DatabaseNameChanged DatabaseDescription DatabaseDescriptionChanged DefaultUserName DefaultUserNameChanged MaintenanceHistoryDays Color MasterKeyChanged MasterKeyChangeRec MasterKeyChangeForce MemoryProtection RecycleBinEnabled RecycleBinUUID RecycleBinChanged EntryTemplatesGroup EntryTemplatesGroupChanged LastSelectedGroup LastTopVisibleGroup HistoryMaxItems HistoryMaxSize SettingsChanged CustomData CustomIcons Binaries"
                     }
                     "MemoryProtection" => {
                         "ProtectTitle ProtectUserName ProtectPassword ProtectURL ProtectNotes"
