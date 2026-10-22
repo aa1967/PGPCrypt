@@ -19,7 +19,6 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QHeaderView>
-#include <QInputDialog>
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QLocalServer>
@@ -52,6 +51,9 @@
 #include <QTabBar>
 #include <QTableWidget>
 #include <QTemporaryDir>
+#include <QTemporaryFile>
+#include <QStringDecoder>
+#include <fcntl.h>
 #include <QTimer>
 #include <QTimeZone>
 #include <QToolBar>
@@ -68,6 +70,8 @@
 namespace {
 constexpr int RestartLocked = 75;
 constexpr qsizetype MaxFrame = 8 * 1024 * 1024;
+constexpr qsizetype MaxMessageInput = 4 * 1024 * 1024;
+constexpr qsizetype MaxMessageOutput = 4 * 1024 * 1024;
 using Reply = std::function<void(bool, const QJsonObject&)>;
 
 bool harden(bool dieWithParent) {
@@ -197,6 +201,7 @@ private:
     QComboBox* signingChoice = nullptr;
     QLabel* defaultKeyLabel = nullptr;
     QString testFingerprint;
+    bool outputIsEncrypted = false;
     QLocalServer rpcServer;
     bool rpcBusy=false;
     QElapsedTimer rpcRate;
@@ -247,6 +252,11 @@ private:
         tabs->setEnabled(true); lockedPage->setEnabled(true);
         const bool ok = response.value("ok").toBool();
         const auto code=response.value("code").toString();
+        if(!ok && code=="vault_reopen_required") {
+            const QString message="The vault was saved, but its folder could not be synced. Reopen it before making more changes. Keep a backup before shutting down.";
+            if(testing) {fail(message); return;}
+            endSession(true,message); return;
+        }
         if (!ok && code!="password_required") fail(response.value("error").toString("Operation failed"));
         else statusBar()->showMessage("Ready • Offline");
         auto data=response.value("data").toObject(); if(!ok) data.insert("_error_code",code);
@@ -254,7 +264,7 @@ private:
         updateVaultSubmit();
     }
 
-    void endSession(bool restart) {
+    void endSession(bool restart, const QString& notice = {}) {
         if (ending) return;
         ending = true;
         idle.stop(); rpcServer.close(); if(!rpcPath.isEmpty()) {QLocalServer::removeServer(rpcPath); rpcPath.clear();}
@@ -264,6 +274,13 @@ private:
             if (!process.waitForFinished(5000)) { ending = false; idle.start(); fail("Worker could not be stopped; vault lock is not confirmed"); return; }
         }
         unlocked = false;
+        if(!testing && !notice.isEmpty()) {
+            root->setCurrentWidget(homePage);
+            input->clear(); output->clear(); keys->setRowCount(0);
+            recipientChoices->clear(); signingChoice->clear();
+            settingsAction->setEnabled(false); convertAction->setEnabled(false);
+            QMessageBox::warning(this,"Reopen vault",notice);
+        }
         if (testing) {
             std::fputs("Qt desktop self-test passed: create, generate, encrypt, decrypt, sign, verify, notes, lock; worker terminated\n", stdout);
             qApp->exit(restartTest ? RestartLocked : 0);
@@ -287,7 +304,7 @@ private:
         welcome->setContentsMargins(100,60,100,60); welcome->addStretch();
         auto* title = new QLabel("PGPCrypt"); title->setStyleSheet("font-size: 36px; font-weight: 600;");
         welcome->addWidget(title);
-        auto* subtitle = new QLabel("Keep your OpenPGP keys and notes in an encrypted vault.");
+        auto* subtitle = new QLabel("Keep your OpenPGP keys in an encrypted vault.");
         subtitle->setWordWrap(true); welcome->addWidget(subtitle); welcome->addSpacing(28);
         auto* createVault = new QPushButton("Create vault");
         auto* openVault = new QPushButton("Open vault");
@@ -298,7 +315,7 @@ private:
         connect(openVault,&QPushButton::clicked,this,[this] { browseOpenVault(); });
         connect(quit,&QPushButton::clicked,this,&QWidget::close);
         welcome->addSpacing(20);
-        welcome->addWidget(new QLabel("Offline key management • age v1 encrypted vaults"));
+        welcome->addWidget(new QLabel("Offline key management • age and KeePass vaults"));
         welcome->addStretch();
         root->addWidget(homePage);
 
@@ -458,7 +475,7 @@ private:
         if(!unlocked || pending) return;
         QDialog dialog(this); dialog.setWindowTitle("Save converted vault copy");
         auto* layout=new QVBoxLayout(&dialog); auto* form=new QFormLayout;
-        auto* info=new QLabel("Copies saved PGPCrypt keys, revocation certificates, notes and settings. Save note edits first. The source stays unchanged and open. Unrelated KeePass entries remain in the source.");
+        auto* info=new QLabel("Copy PGPCrypt keys and settings to a new vault. The original stays open and unchanged. Other KeePass entries stay in the original.");
         info->setWordWrap(true); layout->addWidget(info);
         auto* format=new QComboBox; format->addItem("age v1","age"); format->addItem("KeePass KDBX 4.1 (alpha support)","kdbx"); format->setCurrentIndex(currentFormat=="age"?1:0); form->addRow("Destination format",format);
         auto* filename=new QLineEdit; auto* row=new QHBoxLayout; auto* browse=new QPushButton("Browse…"); row->addWidget(filename); row->addWidget(browse); form->addRow("New vault file",row);
@@ -562,7 +579,7 @@ private:
                 if(rpcRate.isValid() && rpcRate.elapsed()<1000) {reply(false,{}); return;} rpcRate.start();
                 rpcBusy=true;
                 QDialog dialog(this); dialog.setWindowTitle("Approve Qubes request"); dialog.setMinimumSize(650,420);
-                auto* layout=new QVBoxLayout(&dialog); auto* identity=new QLabel("Caller: "+caller+"\nOperation: "+operation+"\n"+(operation=="sign"?"Signing fingerprint: "+fp:"The authenticated plaintext will be returned to this caller.")); identity->setTextFormat(Qt::PlainText); identity->setWordWrap(true); layout->addWidget(identity);
+                auto* layout=new QVBoxLayout(&dialog); auto* identity=new QLabel("From Qube: "+caller+"\nAction: "+operation+"\n"+(operation=="sign"?"Signing fingerprint: "+fp:"Decrypted text will be returned to this Qube.")); identity->setTextFormat(Qt::PlainText); identity->setWordWrap(true); layout->addWidget(identity);
                 auto* preview=editor(operation=="sign"?"Signing content":"Encrypted content",true); preview->setPlainText(object.value("text").toString()); layout->addWidget(preview);
                 auto* buttons=new QDialogButtonBox(QDialogButtonBox::Yes|QDialogButtonBox::Cancel); buttons->button(QDialogButtonBox::Yes)->setText("Approve "+operation); layout->addWidget(buttons);
                 connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept); connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
@@ -584,17 +601,26 @@ private:
         activityClock.restart(); lastTick=QDateTime::currentMSecsSinceEpoch();
         const auto theme=value.value("theme").toString("light");
         qApp->setStyle(QStyleFactory::create("Fusion"));
-        QPalette palette;
-        if(theme=="dark" || theme=="solarized") {
-            const bool solar=theme=="solarized"; const QColor background(solar?"#002b36":"#24272e"),base(solar?"#073642":"#191c22"),text(solar?"#93a1a1":"#e6e6e6"),accent(solar?"#268bd2":"#568dcc");
+        QPalette palette=qApp->style()->standardPalette();
+        QColor background, base, text, accent, muted;
+        bool custom=true;
+        if(theme=="dark") {background="#24272e"; base="#191c22"; text="#e6e6e6"; accent="#568dcc"; muted="#9aa4b3";}
+        else if(theme=="nord") {background="#2e3440"; base="#242933"; text="#eceff4"; accent="#5e81ac"; muted="#a8b2c4";}
+        else if(theme=="warm-light") {background="#f3eee5"; base="#fffaf1"; text="#342e27"; accent="#99632f"; muted="#756b5b";}
+        else if(theme=="solarized-light") {background="#eee8d5"; base="#fdf6e3"; text="#586e75"; accent="#006b98"; muted="#657b83";}
+        else if(theme=="solarized" || theme=="solarized-dark") {background="#002b36"; base="#073642"; text="#93a1a1"; accent="#268bd2"; muted="#839496";}
+        else custom=false;
+        if(custom) {
             palette.setColor(QPalette::Window,background); palette.setColor(QPalette::WindowText,text); palette.setColor(QPalette::Base,base); palette.setColor(QPalette::AlternateBase,background);
             palette.setColor(QPalette::Text,text); palette.setColor(QPalette::Button,background); palette.setColor(QPalette::ButtonText,text); palette.setColor(QPalette::Highlight,accent); palette.setColor(QPalette::HighlightedText,Qt::white);
-            palette.setColor(QPalette::ToolTipBase,base); palette.setColor(QPalette::ToolTipText,text); palette.setColor(QPalette::PlaceholderText,QColor("#839496")); palette.setColor(QPalette::Disabled,QPalette::Text,QColor("#65737e"));
-        } else {palette=qApp->style()->standardPalette();}
+            palette.setColor(QPalette::ToolTipBase,base); palette.setColor(QPalette::ToolTipText,text); palette.setColor(QPalette::PlaceholderText,muted);
+            for(auto role:{QPalette::Text,QPalette::WindowText,QPalette::ButtonText}) palette.setColor(QPalette::Disabled,role,muted);
+            palette.setColor(QPalette::Link,accent);
+        }
         qApp->setPalette(palette);
         clipboardTimer.stop(); selectionTimer.stop();
         if(clipboardSeconds>0) { if(qApp->clipboard()->ownsClipboard()) clipboardTimer.start(clipboardSeconds*1000); if(qApp->clipboard()->ownsSelection()) selectionTimer.start(clipboardSeconds*1000); }
-        if(sessionWarning) sessionWarning->setText(autoLock?"Automatic lock after "+QString::number(idleTimeoutSeconds/60)+" minutes idle. Preferences are in Settings.":"Automatic inactivity locking is off. Use Ctrl+L to lock, or enable locking in Settings.");
+        if(sessionWarning) sessionWarning->setText(autoLock?"Locks after "+QString::number(idleTimeoutSeconds/60)+" minutes idle. Change in Settings.":"Auto-lock is off. Press Ctrl+L to lock. Change in Settings.");
         configureQubes();
     }
 
@@ -610,22 +636,28 @@ private:
         if(!unlocked || pending) return;
         QDialog dialog(this); dialog.setWindowTitle("Vault settings"); dialog.setMinimumWidth(540);
         auto* layout=new QVBoxLayout(&dialog); auto* form=new QFormLayout;
-        auto* enable=new QCheckBox("Enable automatic inactivity locking"); enable->setChecked(autoLock); form->addRow(enable);
+        auto* enable=new QCheckBox("Lock after inactivity"); enable->setChecked(autoLock); form->addRow(enable);
         auto* minutes=new QSlider(Qt::Horizontal); minutes->setRange(1,60); minutes->setValue(idleTimeoutSeconds/60); minutes->setEnabled(autoLock);
         auto* minuteLabel=new QLabel; auto updateMinutes=[=] {minuteLabel->setText(QString::number(minutes->value())+" minutes");}; updateMinutes();
         auto* row=new QHBoxLayout; row->addWidget(minutes); row->addWidget(minuteLabel); form->addRow("Inactivity timeout",row);
         connect(enable,&QCheckBox::toggled,minutes,&QWidget::setEnabled); connect(minutes,&QSlider::valueChanged,&dialog,updateMinutes);
-        auto* focus=new QCheckBox("Lock when application loses focus"); focus->setChecked(focusLock); form->addRow(focus);
-        auto* events=new QCheckBox("Lock on desktop lock / suspend / Qubes host-lock requests"); events->setChecked(sessionLock); form->addRow(events);
+        auto* focus=new QCheckBox("Lock when switching away from PGPCrypt"); focus->setChecked(focusLock); form->addRow(focus);
+        auto* events=new QCheckBox("Lock on desktop lock, suspend or Qubes lock request"); events->setChecked(sessionLock); form->addRow(events);
         auto* clip=new QCheckBox("Clear text copied from PGPCrypt"); clip->setChecked(clipboardSeconds>0); form->addRow(clip);
         auto* seconds=new QSlider(Qt::Horizontal); seconds->setRange(5,1800); seconds->setValue(clipboardSeconds>0?clipboardSeconds:30); seconds->setEnabled(clipboardSeconds>0);
         auto* secondLabel=new QLabel; auto updateSeconds=[=] {secondLabel->setText(QString::number(seconds->value()/60)+"m "+QString::number(seconds->value()%60)+"s");}; updateSeconds();
         auto* clipRow=new QHBoxLayout; clipRow->addWidget(seconds); clipRow->addWidget(secondLabel); form->addRow("Clipboard delay",clipRow);
         connect(clip,&QCheckBox::toggled,seconds,&QWidget::setEnabled); connect(seconds,&QSlider::valueChanged,&dialog,updateSeconds);
-        auto* theme=new QComboBox; for(const auto& name:QStringList{"light","dark","solarized"}) theme->addItem(name,name); theme->setCurrentIndex(qMax(0,theme->findData(preferences.value("theme").toString("light")))); form->addRow("Theme",theme);
-        auto* qubes=new QCheckBox("Enable Qubes RPC while this vault is unlocked"); qubes->setChecked(qubesEnabled); form->addRow(qubes);
+        auto* theme=new QComboBox;
+        theme->addItem("Light","light"); theme->addItem("Warm light","warm-light"); theme->addItem("Dark","dark"); theme->addItem("Nord","nord"); theme->addItem("Solarized light","solarized-light"); theme->addItem("Solarized dark","solarized-dark");
+        auto savedTheme=preferences.value("theme").toString("light"); if(savedTheme=="solarized") savedTheme="solarized-dark";
+        theme->setCurrentIndex(qMax(0,theme->findData(savedTheme))); form->addRow("Theme",theme);
+        auto* qubes=new QCheckBox("Allow requests from other Qubes while unlocked"); qubes->setChecked(qubesEnabled); form->addRow(qubes);
+        auto* qubesHint=new QLabel("Other Qubes can ask this vault to sign or decrypt. You approve each request here; private keys stay in this Qube. A dom0 policy must allow the client first."); qubesHint->setWordWrap(true); form->addRow(qubesHint);
+        auto* qubesHelp=new QPushButton("Qubes setup details…"); form->addRow(qubesHelp);
+        connect(qubesHelp,&QPushButton::clicked,&dialog,[&] {QMessageBox::information(&dialog,"Qubes requests","This enables the local PGPCrypt service only while the vault is open.\n\nInstall a named-client qrexec policy in dom0 separately. The setup guide is /usr/share/doc/pgpcrypt/design/QUBES.md; policy examples are in /usr/share/doc/pgpcrypt/source.tar.gz. Each request shows its source Qube and content for your approval.\n\nAutomatic host locking also needs the separate dom0 lock hook and the lock-events setting above. Do not enable requests from untrusted clients.");});
         layout->addLayout(form);
-        auto* hint=new QLabel("Preferences are encrypted inside this vault. Clipboard clearing affects copies still owned by PGPCrypt; it cannot remove clipboard-manager or inter-qube copies. Qubes RPC needs named-client policy rules in dom0 and local approval for each operation."); hint->setWordWrap(true); layout->addWidget(hint);
+        auto* hint=new QLabel("Settings are encrypted in this vault. Clipboard expiry cannot erase copies kept by other apps or Qubes."); hint->setWordWrap(true); layout->addWidget(hint);
         auto* convert=new QPushButton("Save converted vault copy…"); layout->addWidget(convert); connect(convert,&QPushButton::clicked,&dialog,[&] {dialog.reject(); convertVault();});
         auto* buttons=new QDialogButtonBox(QDialogButtonBox::Save|QDialogButtonBox::Cancel); layout->addWidget(buttons); connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject); connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
         if(dialog.exec()!=QDialog::Accepted) return;
@@ -653,7 +685,7 @@ private:
         auto* publicExport = new QPushButton("Show public export"); actions->addWidget(publicExport);
         connect(publicExport,&QPushButton::clicked,this,[this] {
             const int row=keys->currentRow(); if(row<0) { fail("Select a key"); return; }
-            request("public_export",{{"fingerprint",keys->item(row,4)->text()}},[this](bool ok,const QJsonObject& data) { if(ok) { output->setPlainText(data.value("text").toString()); tabs->setCurrentIndex(1); statusBar()->showMessage("Public export: publishing it exposes its identities"); } });
+            request("public_export",{{"fingerprint",keys->item(row,4)->text()}},[this](bool ok,const QJsonObject& data) { if(ok) { outputIsEncrypted=false; output->setPlainText(data.value("text").toString()); tabs->setCurrentIndex(1); statusBar()->showMessage("Public export: publishing it exposes its identities"); } });
         });
         layout->addLayout(actions);
         auto* backupActions = new QHBoxLayout;
@@ -677,7 +709,7 @@ private:
         layout->addLayout(backupActions);
         auto* lower = new QTabWidget;
         auto* generatePage = new QWidget; auto* generateLayout = new QVBoxLayout(generatePage);
-        auto* description = new QLabel("Create an OpenPGP identity with an optional email/comment, expiry, capabilities and an optional private-key password. An emergency revocation certificate is saved inside the vault.");
+        auto* description = new QLabel("Create a key with optional email, comment and password. A revocation certificate is saved in the vault for emergencies.");
         description->setWordWrap(true); generateLayout->addWidget(description);
         auto* generate = new QPushButton("Create key…"); generateLayout->addWidget(generate); generateLayout->addStretch();
         connect(generate,&QPushButton::clicked,this,[this] { createKeyDialog(); });
@@ -693,15 +725,9 @@ private:
     void exportSelected(const QString& operation) {
         const int row=keys->currentRow(); if(row<0) { fail("Select a key"); return; }
         QJsonObject fields{{"fingerprint",keys->item(row,4)->text()}};
-        if(operation=="revocation_export" && !keys->item(row,4)->data(Qt::UserRole+4).toBool() && keys->item(row,4)->data(Qt::UserRole+3).toBool()) {
-            bool accepted=false;
-            auto pass=QInputDialog::getText(this,"Create revocation certificate","Private-key password/passphrase",QLineEdit::Password,{},&accepted);
-            if(!accepted) return;
-            fields.insert("password",pass); pass.fill(QChar('\0'));
-        }
-        request(operation,fields,[this,operation](bool ok,const QJsonObject& data) {
+        performCrypto(operation,fields,[this,operation](bool ok,const QJsonObject& data) {
             if(ok) {
-                output->setPlainText(data.value("text").toString()); tabs->setCurrentIndex(1);
+                outputIsEncrypted=false; output->setPlainText(data.value("text").toString()); tabs->setCurrentIndex(1);
                 statusBar()->showMessage(operation=="revocation_export"?"Revocation certificate: back up privately; do not publish until revoking.":(data.value("protected").toBool()?"Private export: protected by its separate key password.":"Private export includes unprotected secret packets; keep the text private."));
             }
         });
@@ -729,13 +755,13 @@ private:
     void addSubkeyDialog(const QString& fp) {
         QDialog dialog(this); dialog.setWindowTitle("Add subkey"); auto* form=new QFormLayout(&dialog);
         auto* purpose=new QComboBox; purpose->addItem("Encryption (transport and storage)","encrypt"); purpose->addItem("Signing","sign"); purpose->addItem("Authentication","authenticate"); form->addRow("Purpose",purpose);
-        auto* algorithm=new QComboBox; algorithm->addItem("Ed25519 / Cv25519","cv25519"); for(int bits:{2048,3072,4096}) algorithm->addItem("RSA "+QString::number(bits),"rsa"+QString::number(bits));
+        auto* algorithm=new QComboBox; algorithm->addItem("Ed25519 / Cv25519","cv25519"); for(int bits:{2048,4096}) algorithm->addItem("RSA "+QString::number(bits),"rsa"+QString::number(bits));
         algorithm->addItem("NIST P-256","p256"); algorithm->addItem("NIST P-384","p384"); algorithm->addItem("NIST P-521","p521"); form->addRow("Algorithm",algorithm);
         auto* expiry=new QCheckBox("Set expiry"); expiry->setChecked(true); auto* date=new QDateTimeEdit(QDateTime::currentDateTimeUtc().addYears(1)); date->setCalendarPopup(true); date->setDisplayFormat("yyyy-MM-dd HH:mm 'UTC'");
         form->addRow(expiry); form->addRow("Expires",date); connect(expiry,&QCheckBox::toggled,date,&QWidget::setEnabled);
         auto* pass=new QLineEdit; auto* confirm=new QLineEdit; for(auto* field:{pass,confirm}) {field->setEchoMode(QLineEdit::Password); field->setInputMethodHints(Qt::ImhSensitiveData|Qt::ImhNoPredictiveText);}
         form->addRow("New subkey password (optional)",pass); form->addRow("Confirm subkey password",confirm);
-        auto* note=new QLabel("Choose an expiry within the primary key lifetime. You will be prompted for its password if needed. Existing subkeys and identity stay intact; publish the updated public certificate to use the new subkey elsewhere."); note->setWordWrap(true); form->addRow(note);
+        auto* note=new QLabel("Expiry must be within the primary key’s lifetime. Export the updated public key after adding a subkey."); note->setWordWrap(true); form->addRow(note);
         auto* error=new QLabel; error->setTextFormat(Qt::PlainText); form->addRow(error); auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel); form->addRow(buttons);
         connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject); connect(buttons,&QDialogButtonBox::accepted,&dialog,[&] {if(pass->text()!=confirm->text()) {error->setText("Passwords do not match"); return;} if(expiry->isChecked() && date->dateTime()<=QDateTime::currentDateTimeUtc().addSecs(60)) {error->setText("Choose a future expiry"); return;} dialog.accept();});
         if(dialog.exec()!=QDialog::Accepted) {pass->clear(); confirm->clear(); return;}
@@ -750,10 +776,10 @@ private:
         auto* name=new QLineEdit; auto* email=new QLineEdit; auto* comment=new QLineEdit;
         name->setMaxLength(128); email->setMaxLength(254); comment->setMaxLength(256);
         form->addRow("Name or pseudonym",name); form->addRow("Email (optional)",email); form->addRow("Public comment (optional)",comment);
-        auto* disclosure=new QLabel("Email and comment are included in public-key exports. Use encrypted vault notes for private information."); disclosure->setWordWrap(true); form->addRow(disclosure);
+        auto* disclosure=new QLabel("Email and comment appear in public-key exports. Leave them blank to avoid sharing them."); disclosure->setWordWrap(true); form->addRow(disclosure);
         auto* algorithm=new QComboBox;
         algorithm->addItem("Ed25519 / Cv25519 (recommended)","cv25519");
-        algorithm->addItem("RSA 2048-bit","rsa2048"); algorithm->addItem("RSA 3072-bit","rsa3072"); algorithm->addItem("RSA 4096-bit","rsa4096");
+        algorithm->addItem("RSA 2048-bit","rsa2048"); algorithm->addItem("RSA 4096-bit","rsa4096");
         algorithm->addItem("ECDSA / ECDH NIST P-256","p256"); algorithm->addItem("ECDSA / ECDH NIST P-384","p384"); algorithm->addItem("ECDSA / ECDH NIST P-521","p521");
         form->addRow("Algorithm",algorithm);
         auto* keyLayout=new QComboBox; keyLayout->addItem("Primary key + separate signing/encryption subkeys","subkeys"); keyLayout->addItem("Single RSA key with selected capabilities","single"); keyLayout->setEnabled(false); form->addRow("Key layout",keyLayout);
@@ -777,7 +803,7 @@ private:
         for(auto* field : {pass,confirm}) { field->setEchoMode(QLineEdit::Password); field->setInputMethodHints(Qt::ImhSensitiveData | Qt::ImhNoPredictiveText | Qt::ImhNoAutoUppercase); }
         form->addRow("Private-key password/passphrase (optional)",pass); form->addRow("Confirm password/passphrase",confirm);
         layout->addLayout(form);
-        auto* hint=new QLabel("Leave both password fields blank for no separate key password. Any nonempty password is accepted and protects exported private keys too. RSA-1024 and DSA/ElGamal creation are unavailable; import legacy keys instead."); hint->setWordWrap(true); layout->addWidget(hint);
+        auto* hint=new QLabel("Leave both passwords blank for no separate key password. A key password also protects private-key exports. Legacy keys can be imported."); hint->setWordWrap(true); layout->addWidget(hint);
         auto* error=new QLabel; error->setTextFormat(Qt::PlainText); error->setWordWrap(true); layout->addWidget(error);
         auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel); layout->addWidget(buttons);
         connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
@@ -833,7 +859,7 @@ private:
                 QStringList identities; for(const auto& value:key.value("identities").toArray()) identities.append(value.toString());
                 const auto identity=identities.isEmpty()?fp:identities.join("; ");
                 keys->setItem(row,1,new QTableWidgetItem(identity));
-                keys->setItem(row,2,new QTableWidgetItem(key.value("has_secret").toBool()?(key.value("secret_protected").toBool()?"Private (password)":"Private (unprotected packets)"):"Public only"));
+                keys->setItem(row,2,new QTableWidgetItem(key.value("has_secret").toBool()?(key.value("secret_protected").toBool()?"Private (password)":(key.value("secret_any_protected").toBool()?"Private (mixed protection)":"Private (no password)")):"Public only"));
                 keys->setItem(row,3,new QTableWidgetItem(key.value("status").toString()));
                 auto* fingerprint=new QTableWidgetItem(fp); fingerprint->setData(Qt::UserRole+1,key.value("can_sign").toBool());
                 fingerprint->setData(Qt::UserRole+3,key.value("secret_protected").toBool());
@@ -848,7 +874,7 @@ private:
                     recipient->setFlags(Qt::ItemIsEnabled|Qt::ItemIsUserCheckable|Qt::ItemIsSelectable);
                     recipient->setCheckState(chosenRecipients.contains(fp)?Qt::Checked:Qt::Unchecked);
                 }
-                if(key.value("can_sign").toBool()) { signingChoice->addItem(identity+" — "+fp,fp); signingChoice->setItemData(signingChoice->count()-1,fp,Qt::ToolTipRole); }
+                if(key.value("can_sign").toBool()) { signingChoice->addItem(identity+" — "+fp,fp); signingChoice->setItemData(signingChoice->count()-1,fp+(key.value("signing_password_required").toBool()?"\nPassword required to sign":"\nSigning key available without a password"),Qt::ToolTipRole); }
             }
             const auto wanted=previousSigner.isEmpty()?defaultSigner:previousSigner;
             signingChoice->setCurrentIndex(qMax(0,signingChoice->findData(wanted)));
@@ -860,7 +886,7 @@ private:
 
     void buildText() {
         auto* page=new QWidget; auto* layout=new QVBoxLayout(page);
-        auto* label=new QLabel("Select recipients and a signing key here. Text is not automatically saved."); label->setWordWrap(true); layout->addWidget(label);
+        auto* label=new QLabel("Encrypt for selected recipients, or sign readable text with your key. Use Open message and Save output for files."); label->setWordWrap(true); layout->addWidget(label);
         auto* form=new QFormLayout;
         recipientChoices=new QListWidget; recipientChoices->setMaximumHeight(125); form->addRow("Encrypt to",recipientChoices);
         signingChoice=new QComboBox; signingChoice->setMinimumContentsLength(24); signingChoice->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
@@ -877,7 +903,7 @@ private:
         connect(signingChoice,&QComboBox::currentIndexChanged,this,[this] { updateSelection(); });
         connect(recipientChoices,&QListWidget::itemChanged,this,[this] { updateSelection(); });
         selectionSummary=new QLabel; selectionSummary->setTextFormat(Qt::PlainText); selectionSummary->setWordWrap(true); layout->addWidget(selectionSummary);
-        input=editor("Paste plaintext or an armored OpenPGP message…"); output=editor("Result appears here after authentication succeeds.",true);
+        input=editor("Paste plaintext or an armored OpenPGP message…"); output=editor("Result appears here after the operation succeeds…",true);
         auto* panes=new QSplitter(Qt::Vertical); panes->addWidget(input); panes->addWidget(output); layout->addWidget(panes,1);
         auto* actions=new QHBoxLayout;
         for(const auto& name:QStringList{"Encrypt","Decrypt","Sign","Verify"}) {
@@ -885,10 +911,74 @@ private:
             connect(button,&QPushButton::clicked,this,[this,name] { textAction(name.toLower()); });
         }
         auto* clear=new QPushButton("Clear"); actions->addWidget(clear);
-        connect(clear,&QPushButton::clicked,this,[this]{ input->clear(); output->clear(); });
+        connect(clear,&QPushButton::clicked,this,[this]{ input->clear(); output->clear(); outputIsEncrypted=false; });
         layout->addLayout(actions);
+        auto* files=new QHBoxLayout;
+        auto* openMessage=new QPushButton("Open message…"); files->addWidget(openMessage);
+        auto* saveOutput=new QPushButton("Save output…"); files->addWidget(saveOutput); files->addStretch(); layout->addLayout(files);
+        saveOutput->setEnabled(false); connect(output,&QPlainTextEdit::textChanged,saveOutput,[this,saveOutput] {saveOutput->setEnabled(!output->toPlainText().isEmpty());});
+        connect(openMessage,&QPushButton::clicked,this,[this] {const auto filename=chooseMessagePath(false); if(!filename.isEmpty()) loadMessageFile(filename);});
+        connect(saveOutput,&QPushButton::clicked,this,[this] {
+            if(!outputIsEncrypted && QMessageBox::question(this,"Save readable output","This saves readable text or key material outside the vault. Keep private messages, private keys and revocation certificates private. Continue?",QMessageBox::Save|QMessageBox::Cancel,QMessageBox::Cancel)!=QMessageBox::Save) return;
+            const auto filename=chooseMessagePath(true); if(!filename.isEmpty()) saveOutputFile(filename);
+        });
         layout->addWidget(new QLabel("Undo history is disabled. Clipboard managers may retain copied text after locking."));
         tabs->addTab(page,"Notepad");
+    }
+
+    QString chooseMessagePath(bool save) {
+        const bool armored=output->toPlainText().startsWith("-----BEGIN PGP ");
+        const auto initial=save?QDir::home().filePath(armored?"message.asc":"message.txt"):QDir::homePath();
+        QFileDialog dialog(this,save?"Save output":"Open message",initial);
+        dialog.setOption(QFileDialog::DontUseNativeDialog); dialog.setOption(QFileDialog::DontResolveSymlinks);
+        dialog.setAcceptMode(save?QFileDialog::AcceptSave:QFileDialog::AcceptOpen);
+        dialog.setFileMode(save?QFileDialog::AnyFile:QFileDialog::ExistingFile);
+        dialog.setNameFilters({"Messages (*.asc *.pgp *.txt)","All files (*)"});
+        if(save) dialog.setDefaultSuffix(armored?"asc":"txt");
+        if(dialog.exec()!=QDialog::Accepted || dialog.selectedFiles().isEmpty()) return {};
+        return QFileInfo(dialog.selectedFiles().first()).absoluteFilePath();
+    }
+
+    bool loadMessageFile(const QString& filename) {
+        const auto encoded=QFile::encodeName(filename);
+        const int descriptor=::open(encoded.constData(),O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK);
+        if(descriptor<0) {fail("Cannot open message. Choose a readable file, not a symbolic link."); return false;}
+        struct stat metadata{};
+        if(::fstat(descriptor,&metadata)!=0 || !S_ISREG(metadata.st_mode) || metadata.st_size<0 || metadata.st_size>MaxMessageInput) {::close(descriptor); fail("Choose a regular text message no larger than 4 MiB."); return false;}
+        QFile file;
+        if(!file.open(descriptor,QIODevice::ReadOnly,QFileDevice::AutoCloseHandle)) {::close(descriptor); fail("Cannot read message."); return false;}
+        auto bytes=file.read(MaxMessageInput+1);
+        if(file.error()!=QFileDevice::NoError || bytes.size()>MaxMessageInput || bytes.contains('\0')) {bytes.fill('\0'); fail("Choose a UTF-8 text message no larger than 4 MiB."); return false;}
+        QStringDecoder decoder(QStringDecoder::Utf8); QString text=decoder(bytes); bytes.fill('\0');
+        if(decoder.hasError()) {fail("This file is not UTF-8 text. Open an armored (.asc) message instead."); return false;}
+        input->setPlainText(text); outputIsEncrypted=false; output->clear(); tabs->setCurrentIndex(1);
+        statusBar()->showMessage("Message loaded into Input. Choose Decrypt, Verify, Encrypt or Sign."); return true;
+    }
+
+    bool saveOutputFile(const QString& filename) {
+        const auto target=QFileInfo(filename).absoluteFilePath();
+        const auto vaultPath=absoluteVaultPath(path->text());
+        for(const auto& reserved:QStringList{vaultPath,vaultPath+".lock"}) {
+            if(target==reserved || (QFileInfo::exists(target) && QFileInfo(target).canonicalFilePath()==QFileInfo(reserved).canonicalFilePath())) {fail("Choose a message filename. The open vault and its lock file cannot be overwritten."); return false;}
+        }
+        const auto encoded=QFile::encodeName(target); struct stat metadata{};
+        if(::lstat(encoded.constData(),&metadata)==0) {
+            if(!S_ISREG(metadata.st_mode)) {fail("Choose a regular file, not a symbolic link."); return false;}
+        } else if(errno!=ENOENT) {fail("Cannot access the output location."); return false;}
+        auto bytes=output->toPlainText().toUtf8();
+        if(bytes.isEmpty() || bytes.size()>MaxMessageOutput) {bytes.fill('\0'); fail("Output must contain text no larger than 4 MiB."); return false;}
+        // A same-folder private temporary file plus rename keeps partial output
+        // out of the final file. rename never follows a destination symlink.
+        QTemporaryFile file(QFileInfo(target).absolutePath()+"/.pgpcrypt-message-XXXXXX");
+        if(!file.open() || !file.setPermissions(QFileDevice::ReadOwner|QFileDevice::WriteOwner)) {bytes.fill('\0'); fail("Cannot create a private output file. Choose a writable folder."); return false;}
+        const bool written=file.write(bytes)==bytes.size(); bytes.fill('\0');
+        if(!written || !file.flush() || ::fsync(file.handle())!=0) {fail("Output could not be saved completely. Try another folder."); return false;}
+        if(::rename(QFile::encodeName(file.fileName()).constData(),encoded.constData())!=0) {fail("Cannot save output. Check folder permissions."); return false;}
+        file.setAutoRemove(false);
+        const int directory=::open(QFile::encodeName(QFileInfo(target).absolutePath()).constData(),O_RDONLY|O_DIRECTORY|O_CLOEXEC);
+        const bool synced=directory>=0 && ::fsync(directory)==0; if(directory>=0) ::close(directory);
+        statusBar()->showMessage(synced?(outputIsEncrypted?"Encrypted message saved.":"Readable output saved outside the vault."):"Output saved, but folder sync failed. Keep a copy before shutting down.");
+        return true;
     }
 
     void saveDefaultKey(const QString& fingerprint) {
@@ -911,14 +1001,14 @@ private:
         QJsonArray recipients;
         for(int i=0;i<recipientChoices->count();++i) if(recipientChoices->item(i)->checkState()==Qt::Checked) recipients.append(recipientChoices->item(i)->data(Qt::UserRole).toString());
         QJsonObject fields{{"text",input->toPlainText()},{"fingerprint",signer},{"recipients",recipients}};
-        output->clear();
+        outputIsEncrypted=false; output->clear();
         performCrypto(operation,fields,[this,operation,after](bool ok,const QJsonObject& data) {
             if(!ok) return;
-            output->setPlainText(data.value("text").toString());
+            outputIsEncrypted=operation=="encrypt"; output->setPlainText(data.value("text").toString());
             if(operation=="verify" || operation=="decrypt") {
                 QStringList signers; for(const auto& fp:data.value("signers").toArray()) signers.append(fp.toString());
                 statusBar()->showMessage(signers.isEmpty()?"Decrypted. No signature verified.":"Valid signature: "+signers.join(", ")+" — identity must be checked independently.");
-            } else statusBar()->showMessage(operation=="encrypt"?"Encrypted. Recipient identifiers may be visible in the exported message.":"Signed. The signature can identify the signer.");
+            } else statusBar()->showMessage(operation=="encrypt"?"Encrypted. Recipient identifiers may be visible in the exported message.":"Signed text is readable. The signature identifies the signing key.");
             if(after) after();
         });
     }
@@ -930,10 +1020,14 @@ private:
                 bool accepted=true; QString pass;
                 if(testing) pass=testKdbx?"":"x";
                 else {
-                    QInputDialog dialog(this); dialog.setWindowTitle("Unlock private key"); dialog.setLabelText(attempt?"Password/passphrase incorrect. Try again:":"Private-key password/passphrase:"); dialog.setTextEchoMode(QLineEdit::Password);
+                    QDialog dialog(this); dialog.setWindowTitle("Unlock private key");
+                    auto* form=new QFormLayout(&dialog); auto* prompt=new QLabel(attempt?"Password/passphrase was not accepted. Try again:":"This private key is password protected."); prompt->setWordWrap(true); form->addRow(prompt);
+                    auto* entry=new QLineEdit; entry->setEchoMode(QLineEdit::Password); entry->setInputMethodHints(Qt::ImhSensitiveData|Qt::ImhNoPredictiveText|Qt::ImhNoAutoUppercase); form->addRow("Password/passphrase",entry);
+                    auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel); form->addRow(buttons);
+                    connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept); connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject); connect(entry,&QLineEdit::returnPressed,&dialog,&QDialog::accept);
                     QTimer timeout; timeout.setSingleShot(true);
                     if(remoteCall) {if(!peer || peer->state()!=QLocalSocket::ConnectedState) {done(false,{}); return;} connect(peer,&QLocalSocket::disconnected,&dialog,&QDialog::reject); connect(&timeout,&QTimer::timeout,&dialog,&QDialog::reject); timeout.start(60000);}
-                    accepted=dialog.exec()==QDialog::Accepted; pass=dialog.textValue(); dialog.setTextValue({});
+                    entry->setFocus(); accepted=dialog.exec()==QDialog::Accepted; pass=entry->text(); entry->clear();
                 }
                 if(!accepted || ending || (remoteCall && (!peer || peer->state()!=QLocalSocket::ConnectedState))) {statusBar()->showMessage("Operation cancelled"); done(false,{}); return;}
                 fields.insert("password",pass); pass.fill(QChar('\0')); performCrypto(operation,fields,done,attempt+1,peer,remoteCall); return;
@@ -951,7 +1045,7 @@ private:
         connect(socket,&QLocalSocket::disconnected,this,[this,socket,response,finished,expected,after] {
             if(*finished) return;
             *finished=true; const auto result=QJsonDocument::fromJson(*response).object();
-            if(result.value("ok").toBool()!=expected || (expected && !result.value("data").toObject().value("text").toString().contains("BEGIN PGP MESSAGE"))) {socket->deleteLater(); fail("Local Qubes broker approval/denial failed"); return;}
+            if(result.value("ok").toBool()!=expected || (expected && !result.value("data").toObject().value("text").toString().contains("BEGIN PGP SIGNED MESSAGE"))) {socket->deleteLater(); fail("Local Qubes broker approval/denial failed"); return;}
             socket->deleteLater(); QTimer::singleShot(1100,this,after);
         });
         connect(socket,&QLocalSocket::connected,this,[socket,object] {auto bytes=QJsonDocument(object).toJson(QJsonDocument::Compact);bytes.append('\n');socket->write(bytes);});
@@ -1035,9 +1129,14 @@ private:
                 if(output->toPlainText()!="Qt desktop private fixture") { fail("Decryption mismatch"); return; }
                 input->setPlainText("Qt signature fixture");
                 textAction("sign",[this] {
+                    if(!output->toPlainText().startsWith("-----BEGIN PGP SIGNED MESSAGE-----")) {fail("Sign did not produce readable signed text"); return;}
                     input->setPlainText(output->toPlainText());
                     textAction("verify",[this] {
                         if(output->toPlainText()!="Qt signature fixture") { fail("Verification mismatch"); return; }
+                        const auto fixture=QDir::home().filePath("saved-message.txt");
+                        if(!saveOutputFile(fixture) || !loadMessageFile(fixture) || input->toPlainText()!="Qt signature fixture") {fail("Message save/load did not preserve text"); return;}
+                        const QFileInfo saved(fixture);
+                        if(saved.permissions() & (QFileDevice::ReadGroup|QFileDevice::WriteGroup|QFileDevice::ReadOther|QFileDevice::WriteOther)) {fail("Saved message is not private"); return;}
                         request("notes_set",{{"text","encrypted Qt note"}},[this](bool ok,const QJsonObject&) {
                             if(!ok) return;
                             request("notes_get",{},[this](bool ok,const QJsonObject& data) {

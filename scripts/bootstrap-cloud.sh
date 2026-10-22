@@ -9,8 +9,8 @@ configure_cloud_apt
 /usr/bin/apt-get update
 /usr/bin/apt-get --download-only --reinstall -y install -t trixie-backports rustc cargo libstd-rust-dev \
     rustfmt rust-clippy
-/usr/bin/apt-get --download-only --reinstall -y install age libsodium-dev libsodium23
-mkdir -p "$tools_root/debian-rust" "$tools_root/debian-sodium"
+/usr/bin/apt-get --download-only --reinstall -y install age libsodium-dev libsodium23 libssl-dev libssl3t64 openssl openssl-provider-legacy
+mkdir -p "$tools_root/debian-rust" "$tools_root/debian-sodium" "$tools_root/debian-openssl"
 for package in "$apt_root"/archives/libllvm*_*.deb "$apt_root"/archives/rustc_*.deb "$apt_root"/archives/cargo_*.deb \
     "$apt_root"/archives/libstd-rust-*.deb "$apt_root"/archives/rustfmt_*.deb \
     "$apt_root"/archives/rust-clippy_*.deb "$apt_root"/archives/age_*.deb; do
@@ -22,4 +22,9 @@ for package in "$apt_root"/archives/libllvm*_*.deb "$apt_root"/archives/rustc_*.
 done
 for package in "$apt_root"/archives/libsodium-dev_*.deb "$apt_root"/archives/libsodium23_*.deb; do
     dpkg-deb -x "$package" "$tools_root/debian-sodium"
+done
+# Select the authenticated current candidate, not a stale cached archive.
+for package_name in libssl-dev libssl3t64 openssl openssl-provider-legacy; do
+    package_version=$(apt-cache policy "$package_name" | awk '/Candidate:/ {print $2}')
+    dpkg-deb -x "$apt_root/archives/${package_name}_${package_version}_amd64.deb" "$tools_root/debian-openssl"
 done

@@ -2,7 +2,11 @@
 use anyhow::{Context, Result, bail, ensure};
 use openpgp::{
     Cert, KeyHandle,
-    crypto::SessionKey,
+    crypto::{S2K, SessionKey},
+    packet::{
+        Key,
+        key::{KeyRole, SecretKeyMaterial, SecretParts},
+    },
     parse::{Parse, stream::*},
     policy::StandardPolicy,
     serialize::{Serialize, stream::*},
@@ -17,6 +21,100 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub const MAX_TEXT: usize = 1024 * 1024;
 const MAX_OUTPUT: usize = 4 * MAX_TEXT;
+
+// Imported secret packets are untrusted. In particular, an Argon2 S2K can
+// otherwise request terabytes of memory before a password is even checked.
+// Match the KDBX reader's per-derivation ceiling: 256 MiB, 10 passes, 4 lanes.
+// Limit aggregate work as well when a certificate contains many secret keys.
+const MAX_SECRET_UNLOCKS: usize = 16;
+const MAX_ARGON2_MEMORY_EXPONENT: u8 = 18; // 2^18 KiB = 256 MiB.
+const MAX_ARGON2_PASSES: u8 = 10;
+const MAX_ARGON2_LANES: u8 = 4;
+const MAX_ARGON2_KIB_PASSES: u64 = (1 << MAX_ARGON2_MEMORY_EXPONENT) * MAX_ARGON2_PASSES as u64;
+const MAX_ITERATED_HASH_BYTES: u32 = 0x3e00000; // Largest standard encoded count.
+
+struct SecretUnlockBudget {
+    remaining: usize,
+    argon2_kib_passes: u64,
+}
+
+impl Default for SecretUnlockBudget {
+    fn default() -> Self {
+        Self {
+            remaining: MAX_SECRET_UNLOCKS,
+            argon2_kib_passes: MAX_ARGON2_KIB_PASSES,
+        }
+    }
+}
+
+impl SecretUnlockBudget {
+    #[allow(deprecated)] // Legacy S2Ks may be read; newly protected keys use library defaults.
+    fn charge(&mut self, s2k: &S2K) -> Result<()> {
+        ensure!(
+            self.remaining > 0,
+            "Too many private-key unlock attempts in one operation"
+        );
+        let argon2_cost = match s2k {
+            S2K::Argon2 { t, p, m, .. } => {
+                ensure!(
+                    (1..=MAX_ARGON2_PASSES).contains(t)
+                        && (1..=MAX_ARGON2_LANES).contains(p)
+                        && (3..=MAX_ARGON2_MEMORY_EXPONENT).contains(m)
+                        && (1u64 << *m) >= 8 * u64::from(*p),
+                    "Private-key Argon2 parameters exceed supported resource limits"
+                );
+                (1u64 << *m) * u64::from(*t)
+            }
+            S2K::Iterated {
+                hash, hash_bytes, ..
+            } => {
+                ensure!(hash.is_supported(), "Unsupported private-key password hash");
+                ensure!(
+                    *hash_bytes <= MAX_ITERATED_HASH_BYTES,
+                    "Private-key S2K work exceeds supported resource limits"
+                );
+                0
+            }
+            S2K::Salted { hash, .. } | S2K::Simple { hash } => {
+                ensure!(hash.is_supported(), "Unsupported private-key password hash");
+                0
+            }
+            S2K::Implicit => 0,
+            _ => bail!("Unsupported private-key password derivation method"),
+        };
+        ensure!(
+            argon2_cost <= self.argon2_kib_passes,
+            "Combined private-key Argon2 work exceeds supported resource limits"
+        );
+        self.remaining -= 1;
+        self.argon2_kib_passes -= argon2_cost;
+        Ok(())
+    }
+
+    fn unlock<R: KeyRole>(
+        &mut self,
+        key: Key<SecretParts, R>,
+        password: &str,
+    ) -> Result<Key<SecretParts, R>> {
+        if let SecretKeyMaterial::Encrypted(encrypted) = key.secret() {
+            ensure!(
+                encrypted.algo().is_supported(),
+                "Unsupported private-key protection cipher"
+            );
+            ensure!(
+                encrypted.aead_algo().is_none_or(|algo| algo.is_supported()),
+                "Unsupported private-key protection mode"
+            );
+            self.charge(encrypted.s2k())?;
+            // An empty password is valid for imported keys protected with one.
+            // Only an actual failed unlock asks the UI to prompt or retry.
+            key.decrypt_secret(&password.into())
+                .map_err(|_| PasswordRequired.into())
+        } else {
+            Ok(key)
+        }
+    }
+}
 
 pub fn parse(bytes: &[u8]) -> Result<Cert> {
     ensure!(
@@ -214,17 +312,13 @@ fn revocation_armor(signature: openpgp::packet::Signature) -> Result<String> {
 }
 
 pub fn revocation_ticket(cert: &Cert, password: &str) -> Result<String> {
-    let mut key = cert
+    let key = cert
         .primary_key()
         .key()
         .clone()
         .parts_into_secret()
         .context("The primary private key is required to create a revocation certificate")?;
-    if key.secret().is_encrypted() {
-        key = key
-            .decrypt_secret(&password.into())
-            .context("Could not unlock primary key")?;
-    }
+    let key = SecretUnlockBudget::default().unlock(key, password)?;
     let signature = openpgp::cert::CertRevocationBuilder::new()
         .set_reason_for_revocation(ReasonForRevocation::Unspecified, b"Emergency revocation")?
         .build(&mut key.into_keypair()?, cert, None)?;
@@ -256,14 +350,12 @@ pub fn private_armor(cert: &Cert) -> Result<Zeroizing<String>> {
 pub fn protect_private_key(cert: &Cert, old_password: &str, new_password: &str) -> Result<Cert> {
     ensure!(cert.is_tsk(), "Selected key has no private material");
     let mut packets = Vec::new();
+    let mut budget = SecretUnlockBudget::default();
     for ka in cert.keys().secret() {
         let primary = ka.key().fingerprint() == cert.fingerprint();
-        let mut key = ka.key().clone();
-        if key.secret().is_encrypted() {
-            key = key
-                .decrypt_secret(&old_password.into())
-                .context("Could not unlock a secret key packet; check the current passphrase")?;
-        }
+        let mut key = budget.unlock(ka.key().clone(), old_password).context(
+            "Could not unlock a secret key packet; check the current password/passphrase",
+        )?;
         if !new_password.is_empty() {
             key = key.encrypt_secret(&new_password.into())?;
         }
@@ -347,17 +439,13 @@ pub fn add_subkey(
         valid.primary_key().for_certification(),
         "Primary key must support certification"
     );
-    let mut primary = cert
+    let primary = cert
         .primary_key()
         .key()
         .clone()
         .parts_into_secret()
         .context("Primary private key required to certify a new subkey")?;
-    if primary.secret().is_encrypted() {
-        primary = primary
-            .decrypt_secret(&primary_password.into())
-            .map_err(|_| PasswordRequired)?;
-    }
+    let primary = SecretUnlockBudget::default().unlock(primary, primary_password)?;
     let suite = match options.algorithm.as_str() {
         "cv25519" => CipherSuite::Cv25519,
         "rsa2048" => CipherSuite::RSA2k,
@@ -418,7 +506,7 @@ pub fn sign(text: &str, cert: &Cert, password: &str) -> Result<String> {
     bounded(text)?;
     let policy = StandardPolicy::new();
     validate_for_new_operation(cert, &policy)?;
-    let key = cert
+    let mut keys: Vec<_> = cert
         .keys()
         .with_policy(&policy, None)
         .supported()
@@ -426,28 +514,55 @@ pub fn sign(text: &str, cert: &Cert, password: &str) -> Result<String> {
         .revoked(false)
         .for_signing()
         .secret()
-        .next()
-        .context("Selected key has no valid signing secret")?;
-    let mut key = key.key().clone();
-    if key.secret().is_encrypted() {
-        key = key
-            .decrypt_secret(&password.into())
-            .map_err(|_| PasswordRequired)?;
+        .collect();
+    ensure!(!keys.is_empty(), "Selected key has no valid signing secret");
+    if password.is_empty() {
+        // A certificate can mix protected and unprotected subkeys. Do not ask
+        // for an unrelated password when an eligible signing key needs none.
+        keys.sort_by_key(|ka| ka.key().secret().is_encrypted());
     }
-    let mut output = Vec::new();
-    let message = Armorer::new(Message::new(&mut output)).build()?;
-    let message = Signer::new(message, key.into_keypair()?)?.build()?;
-    let mut literal = LiteralWriter::new(message).build()?;
-    literal.write_all(text.as_bytes())?;
-    literal.finalize()?;
-    Ok(String::from_utf8(output)?)
+    let mut budget = SecretUnlockBudget::default();
+    let mut password_required = false;
+    let mut unusable = None;
+    for candidate in keys {
+        let key = match budget.unlock(candidate.key().clone(), password) {
+            Ok(key) => key,
+            Err(error) if error.is::<PasswordRequired>() => {
+                password_required = true;
+                continue;
+            }
+            Err(error) => {
+                if unusable.is_none() {
+                    unusable = Some(error);
+                }
+                continue;
+            }
+        };
+        let mut output = Vec::new();
+        // The cleartext signature framework supplies its own armor and text
+        // canonicalization. Neither Armorer nor LiteralWriter belongs here.
+        let mut message = Signer::new(Message::new(&mut output), key.into_keypair()?)?
+            .cleartext()
+            .build()?;
+        message.write_all(text.as_bytes())?;
+        message.finalize()?;
+        return Ok(String::from_utf8(output)?);
+    }
+    if password_required {
+        return Err(PasswordRequired.into());
+    }
+    Err(unusable.context("Selected key has no usable signing secret")?)
 }
 
 fn bounded(text: &str) -> Result<()> {
-    ensure!(
-        text.len() <= MAX_TEXT,
-        "Text exceeds the 1 MiB prototype limit"
-    );
+    ensure!(text.len() <= MAX_TEXT, "Plaintext exceeds 1 MiB");
+    Ok(())
+}
+
+fn bounded_message(text: &str) -> Result<()> {
+    // ASCII armor and signature framing can make our own 1 MiB plaintext
+    // exceed 1 MiB. Retain a separate bounded allowance for imported messages.
+    ensure!(text.len() <= MAX_OUTPUT, "OpenPGP message exceeds 4 MiB");
     Ok(())
 }
 
@@ -474,6 +589,7 @@ struct Helper {
     password: Zeroizing<String>,
     require_signature: bool,
     signers: Vec<String>,
+    unlock_budget: SecretUnlockBudget,
 }
 
 impl VerificationHelper for Helper {
@@ -512,6 +628,7 @@ impl DecryptionHelper for Helper {
     ) -> Result<Option<Cert>> {
         let policy = StandardPolicy::new();
         let mut password_required = false;
+        let mut unusable = None;
         for cert in &self.certs {
             for ka in cert
                 .keys()
@@ -523,22 +640,26 @@ impl DecryptionHelper for Helper {
                         .is_some_and(|f| f.for_transport_encryption() || f.for_storage_encryption())
                 })
             {
-                let mut key = ka.key().clone();
+                let key = ka.key().clone();
                 if !pkesks.iter().any(|p| {
                     p.recipient()
                         .is_none_or(|recipient| recipient.aliases(key.key_handle()))
                 }) {
                     continue;
                 }
-                if key.secret().is_encrypted() {
-                    key = match key.decrypt_secret(&self.password.as_str().into()) {
-                        Ok(key) => key,
-                        Err(_) => {
-                            password_required = true;
-                            continue;
+                let key = match self.unlock_budget.unlock(key, self.password.as_str()) {
+                    Ok(key) => key,
+                    Err(error) if error.is::<PasswordRequired>() => {
+                        password_required = true;
+                        continue;
+                    }
+                    Err(error) => {
+                        if unusable.is_none() {
+                            unusable = Some(error);
                         }
-                    };
-                }
+                        continue;
+                    }
+                };
                 let mut pair = key.into_keypair()?;
                 for pkesk in pkesks {
                     if let Some((algo, session_key)) = pkesk.decrypt(&mut pair, sym_algo)
@@ -551,6 +672,9 @@ impl DecryptionHelper for Helper {
         }
         if password_required {
             return Err(PasswordRequired.into());
+        }
+        if let Some(error) = unusable {
+            return Err(error);
         }
         bail!(
             "No usable decryption key; check key passphrase, expiration, and imported secret keys"
@@ -576,12 +700,13 @@ fn read_authenticated(reader: &mut impl Read) -> Result<Zeroizing<String>> {
 }
 
 pub fn decrypt(text: &str, certs: Vec<Cert>, password: &str) -> Result<Opened> {
-    bounded(text)?;
+    bounded_message(text)?;
     let helper = Helper {
         certs,
         password: Zeroizing::new(password.into()),
         require_signature: false,
         signers: vec![],
+        unlock_budget: SecretUnlockBudget::default(),
     };
     let policy = StandardPolicy::new();
     let mut reader = DecryptorBuilder::from_bytes(text)?.with_policy(&policy, None, helper)?;
@@ -591,12 +716,13 @@ pub fn decrypt(text: &str, certs: Vec<Cert>, password: &str) -> Result<Opened> {
 }
 
 pub fn verify(text: &str, certs: Vec<Cert>) -> Result<Opened> {
-    bounded(text)?;
+    bounded_message(text)?;
     let helper = Helper {
         certs,
         password: Zeroizing::new(String::new()),
         require_signature: true,
         signers: vec![],
+        unlock_budget: SecretUnlockBudget::default(),
     };
     let policy = StandardPolicy::new();
     let mut reader = VerifierBuilder::from_bytes(text)?.with_policy(&policy, None, helper)?;
@@ -741,6 +867,204 @@ mod tests {
     }
 
     #[test]
+    fn signing_is_readable_cleartext_and_rejects_tampering() -> Result<()> {
+        let cert = generate("Cleartext signing fixture")?;
+        let input = "Readable UTF-8 — text\t \n-dash escaped line\nlast line  \t\n";
+        let signed = sign(input, &cert, "")?;
+        assert!(signed.starts_with("-----BEGIN PGP SIGNED MESSAGE-----\n"));
+        assert!(signed.contains("Readable UTF-8 — text\n"));
+        assert!(signed.contains("\n- -dash escaped line\n"));
+        assert!(signed.contains("-----BEGIN PGP SIGNATURE-----"));
+        assert!(!signed.contains("-----BEGIN PGP MESSAGE-----"));
+        // RFC 9580's cleartext framework ignores trailing spaces/tabs and its
+        // final separator newline. This is intentionally not byte-preserving.
+        let verified = verify(&signed, vec![cert.clone()])?;
+        assert_eq!(
+            verified.text.as_str(),
+            "Readable UTF-8 — text\n-dash escaped line\nlast line"
+        );
+        assert_eq!(verified.signers, [cert.fingerprint().to_hex()]);
+        assert!(
+            verify(
+                &signed.replace("last line", "changed line"),
+                vec![cert.clone()]
+            )
+            .is_err()
+        );
+        assert_eq!(
+            verify(&sign("no newline", &cert, "")?, vec![cert])?
+                .text
+                .as_str(),
+            "no newline"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_opaque_signatures_remain_verifiable_without_losing_bytes() -> Result<()> {
+        let cert = generate("Opaque signature fixture")?;
+        let policy = StandardPolicy::new();
+        let key = cert
+            .keys()
+            .secret()
+            .with_policy(&policy, None)
+            .supported()
+            .alive()
+            .revoked(false)
+            .for_signing()
+            .next()
+            .context("Fixture signing key missing")?
+            .key()
+            .clone()
+            .into_keypair()?;
+        let input = "Opaque signatures preserve trailing bytes \t\n";
+        let mut bytes = Vec::new();
+        let message = Armorer::new(Message::new(&mut bytes)).build()?;
+        let message = Signer::new(message, key)?.build()?;
+        let mut literal = LiteralWriter::new(message).build()?;
+        literal.write_all(input.as_bytes())?;
+        literal.finalize()?;
+        let signed = String::from_utf8(bytes)?;
+        assert!(signed.starts_with("-----BEGIN PGP MESSAGE-----"));
+        assert_eq!(verify(&signed, vec![cert])?.text.as_str(), input);
+        Ok(())
+    }
+
+    #[test]
+    fn largest_plaintext_outputs_can_be_opened_again() -> Result<()> {
+        let cert = generate("Message size regression fixture")?;
+        let plaintext = "x".repeat(MAX_TEXT);
+        let encrypted = encrypt(&plaintext, std::slice::from_ref(&cert))?;
+        assert!(encrypted.len() > MAX_TEXT && encrypted.len() <= MAX_OUTPUT);
+        assert_eq!(
+            decrypt(&encrypted, vec![cert.clone()], "")?.text.as_str(),
+            plaintext
+        );
+        let signed = sign(&plaintext, &cert, "")?;
+        assert!(signed.len() > MAX_TEXT && signed.len() <= MAX_OUTPUT);
+        assert_eq!(
+            verify(&signed, vec![cert.clone()])?.text.as_str(),
+            plaintext
+        );
+        assert!(sign(&(plaintext.clone() + "x"), &cert, "").is_err());
+        assert!(encrypt(&(plaintext + "x"), std::slice::from_ref(&cert)).is_err());
+        let oversized = "x".repeat(MAX_OUTPUT + 1);
+        assert!(decrypt(&oversized, vec![cert.clone()], "").is_err());
+        assert!(verify(&oversized, vec![cert]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_signing_subkeys_only_prompt_when_no_candidate_unlocks() -> Result<()> {
+        let mut settings = options("cv25519", "subkeys");
+        settings.expires_at = None;
+        let (cert, _) = generate_with_options(&settings, "original")?;
+        let subkey = SubkeyOptions {
+            algorithm: "cv25519".into(),
+            purpose: "sign".into(),
+            expires_at: None,
+        };
+        let passwordless = add_subkey(&cert, &subkey, "original", "")?;
+        assert!(
+            passwordless
+                .keys()
+                .secret()
+                .any(|ka| ka.key().secret().is_encrypted())
+        );
+        assert!(
+            passwordless
+                .keys()
+                .secret()
+                .any(|ka| !ka.key().secret().is_encrypted())
+        );
+        let signed = sign("mixed passwordless signing", &passwordless, "")?;
+        assert_eq!(
+            verify(&signed, vec![passwordless])?.text.as_str(),
+            "mixed passwordless signing"
+        );
+
+        let protected = add_subkey(&cert, &subkey, "original", "different")?;
+        let error = sign("mixed protected signing", &protected, "wrong").unwrap_err();
+        assert!(error.is::<PasswordRequired>());
+        let signed = sign("mixed protected signing", &protected, "different")?;
+        assert_eq!(
+            verify(&signed, vec![protected])?.text.as_str(),
+            "mixed protected signing"
+        );
+        let error = revocation_ticket(&cert, "wrong").unwrap_err();
+        assert!(error.is::<PasswordRequired>());
+        assert!(revocation_ticket(&cert, "original")?.contains("BEGIN PGP PUBLIC KEY BLOCK"));
+        Ok(())
+    }
+
+    #[test]
+    fn imported_empty_password_and_s2k_work_limits() -> Result<()> {
+        use openpgp::packet::key::Encrypted;
+        use openpgp::types::AEADAlgorithm;
+        let cert = generate("Imported key protection fixture")?;
+        let key = cert.primary_key().key().clone().parts_into_secret()?;
+        // Some external tools can encrypt packets with an empty password;
+        // this is distinct from our choice to generate an unprotected packet.
+        let encrypted = key.clone().encrypt_secret(&"".into())?;
+        assert!(encrypted.secret().is_encrypted());
+        assert!(
+            !SecretUnlockBudget::default()
+                .unlock(encrypted, "")?
+                .secret()
+                .is_encrypted()
+        );
+
+        // Fake ciphertext cannot reach derivation: reject its hostile S2K
+        // before a huge allocation, and report a resource error, not a prompt.
+        let mut hostile = key;
+        *hostile.secret_mut() = SecretKeyMaterial::Encrypted(Encrypted::new_aead(
+            S2K::Argon2 {
+                salt: [0; 16],
+                t: 1,
+                p: 1,
+                m: 31,
+            },
+            SymmetricAlgorithm::AES256,
+            AEADAlgorithm::OCB,
+            vec![0; 15].into_boxed_slice(),
+            vec![0; 32].into_boxed_slice(),
+        ));
+        let error = SecretUnlockBudget::default()
+            .unlock(hostile, "")
+            .unwrap_err();
+        assert!(!error.is::<PasswordRequired>());
+        assert!(error.to_string().contains("resource limits"));
+
+        for (t, p, m) in [(11, 1, 16), (1, 5, 16), (1, 1, 19)] {
+            assert!(
+                SecretUnlockBudget::default()
+                    .charge(&S2K::Argon2 {
+                        salt: [0; 16],
+                        t,
+                        p,
+                        m
+                    })
+                    .is_err()
+            );
+        }
+        let expensive = S2K::Argon2 {
+            salt: [0; 16],
+            t: 10,
+            p: 4,
+            m: 18,
+        };
+        let mut budget = SecretUnlockBudget::default();
+        budget.charge(&expensive)?;
+        assert!(budget.charge(&expensive).is_err());
+        let mut budget = SecretUnlockBudget::default();
+        for _ in 0..MAX_SECRET_UNLOCKS {
+            budget.charge(&S2K::default())?;
+        }
+        assert!(budget.charge(&S2K::default()).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn protected_keys_and_modern_profile() -> Result<()> {
         let (cert, _) = openpgp::cert::CertBuilder::general_purpose(Some("Protected fixture"))
             .set_profile(openpgp::Profile::RFC9580)?
@@ -802,7 +1126,8 @@ mod tests {
         assert!(decrypt(&ciphertext, vec![public.clone()], "").is_err());
         let signed = sign(input, &alice, "")?;
         let verified = verify(&signed, vec![public])?;
-        assert_eq!(verified.text.as_str(), input);
+        // Standard cleartext signatures do not preserve their final newline.
+        assert_eq!(verified.text.as_str(), "Private note — UTF-8 supported");
         assert_eq!(verified.signers, [alice.fingerprint().to_hex()]);
         assert!(verify(&signed, vec![bob]).is_err());
         assert!(verify(input, vec![alice.clone()]).is_err());

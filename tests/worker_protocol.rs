@@ -115,6 +115,18 @@ fn worker_vault_workflow_and_private_key_boundary() -> Result<()> {
         "sign",
         json!({"text":"worker signed message","fingerprint":fp,"password":key_password}),
     )?;
+    assert!(
+        signed["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("-----BEGIN PGP SIGNED MESSAGE-----")
+    );
+    assert!(
+        signed["text"]
+            .as_str()
+            .unwrap()
+            .contains("worker signed message")
+    );
     let verified = peer.ok("verify", json!({"text":signed["text"]}))?;
     assert_eq!(verified["text"], "worker signed message");
     assert_eq!(verified["signers"], json!([fp]));
@@ -280,7 +292,24 @@ fn optional_key_passwords_and_default_survive_reopen_and_conversion() -> Result<
         peer.ok("settings_set", json!({"default_signing_key":fp}))?;
         peer.ok("settings_set", json!({"idle_timeout_seconds":120}))?;
         assert_eq!(peer.ok("list", json!({}))?["default_signing_key"], fp);
-        peer.ok("sign", json!({"text":"passwordless signing fixture"}))?;
+        assert_eq!(list["keys"][0]["secret_any_protected"], false);
+        assert_eq!(list["keys"][0]["signing_password_required"], false);
+        let signed = peer.ok("sign", json!({"text":"passwordless signing fixture"}))?;
+        assert!(
+            signed["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("-----BEGIN PGP SIGNED MESSAGE-----")
+        );
+        assert_eq!(
+            peer.ok("verify", json!({"text":signed["text"]}))?["signers"],
+            json!([fp])
+        );
+        let tampered = signed["text"]
+            .as_str()
+            .unwrap()
+            .replace("passwordless signing fixture", "tampered signing fixture");
+        assert_eq!(peer.raw("verify", json!({"text":tampered}))?["ok"], false);
         let exported = peer.ok("private_export", json!({"fingerprint":fp}))?;
         assert_eq!(exported["protected"], false);
         assert!(
@@ -297,10 +326,20 @@ fn optional_key_passwords_and_default_survive_reopen_and_conversion() -> Result<
             "protect_private_key",
             json!({"fingerprint":fp,"new_password":"x"}),
         )?;
-        peer.ok(
+        let protected_signed = peer.ok(
             "sign",
             json!({"text":"short password fixture","password":"x"}),
         )?;
+        assert!(
+            protected_signed["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("-----BEGIN PGP SIGNED MESSAGE-----")
+        );
+        assert_eq!(
+            peer.ok("verify", json!({"text":protected_signed["text"]}))?["signers"],
+            json!([fp])
+        );
         assert_eq!(
             peer.raw(
                 "sign",
@@ -371,6 +410,9 @@ fn preferences_subkeys_and_password_requests_roundtrip() -> Result<()> {
             );
         }
         let preferences = json!({"auto_lock":true,"lock_on_focus_loss":false,"lock_on_session_events":true,"clipboard_clear_seconds":1800,"theme":"solarized","qubes_rpc":false});
+        for theme in ["warm-light", "nord", "solarized-light", "solarized-dark"] {
+            peer.ok("settings_set", json!({"preferences":{"theme":theme}}))?;
+        }
         peer.ok(
             "settings_set",
             json!({"preferences":preferences,"idle_timeout_seconds":3600}),

@@ -1,6 +1,6 @@
 # Qubes 4.3: Debian 13 StandaloneVM
 
-Alpha7 implements opt-in qrexec signing/decryption and a separate dom0-only lock
+PGPCrypt implements opt-in qrexec signing/decryption and a separate dom0-only lock
 service. The cloud checks exercise the local broker and adapter rejection paths;
 a real Qubes 4.3 guest, policy prompts, inter-qube transport and host lock/suspend
 still require testing. This protocol is PGPCrypt-specific, not Split GPG 2 or a
@@ -25,10 +25,10 @@ project in dom0 except a reviewed policy and, optionally, the small lock hook.
 
 ## Enable remote operations
 
-1. Install alpha7 in the vault qube. The package provides the root-owned
+1. Install alpha8 in the vault qube. The package provides the root-owned
    `/etc/qubes-rpc/pgpcrypt.Sign`, `.Decrypt` and `.Lock` handlers and a narrow
    Rust adapter. It installs no dom0 policy or host-lock hooks.
-2. Unlock the vault and enable **Settings → Preferences → Enable Qubes RPC**.
+2. Unlock the vault and enable **Settings → Preferences → Allow requests from other Qubes**.
    The user must have a private `/run/user/UID` directory, owned by that user and
    mode 0700, normally created by logind. The broker socket lives in its private
    `pgpcrypt` subdirectory. Only one enabled broker may run per guest user.
@@ -39,7 +39,7 @@ project in dom0 except a reviewed policy and, optionally, the small lock hook.
    local allow/ask rule. Do not replace them with wildcard allow rules.
 4. In a client qube, feed one JSON line to `qrexec-client-vm pgp-vault
    pgpcrypt.Sign` or `.Decrypt`, close stdin, then read its one-line JSON reply.
-   Version 1 request examples:
+   The Sign service returns a readable cleartext signature. Version 1 request examples:
 
 ```json
 {"version":1,"operation":"sign","fingerprint":"FULL_40_OR_64_HEX_FINGERPRINT","text":"Text to sign"}

@@ -50,11 +50,13 @@ def main():
         peer.request("settings_set", idle_timeout_seconds=120)
         peer.lock()
         key_entry = "PGPCrypt/KDBX interop fixture"
+        assert "Advanced" in run("show", "-q", "-a", "Notes", str(path), key_entry)
         for attribute, expected in [("OpenPGP.PublicKey", public),
                                     ("OpenPGP.PrivateKey", private),
                                     ("OpenPGP.Revocation", ticket)]:
             actual = run("show", "-q", "-s", "-a", attribute, str(path), key_entry)
             assert actual.strip() == expected.strip(), attribute
+        run("edit", "-q", "--notes", "my portable key note", str(path), key_entry)
         run("edit", "-q", "--notes", "edited in KeePassXC", str(path),
             "PGPCrypt/Vault notes and settings")
         run("add", "-q", "--username", "unrelated fixture", str(path), "External entry")
@@ -62,11 +64,29 @@ def main():
         peer.request("open", path=str(path), password=PASS)
         assert peer.request("notes_get")["text"] == "edited in KeePassXC"
         assert peer.request("list")["keys"][0]["fingerprint"] == fingerprint
+        # KeePassXC does not honor PGPCrypt's advisory lock. A save made while
+        # PGPCrypt holds a stale snapshot must survive its next write attempt.
+        run("edit", "-q", "--notes", "external update while PGPCrypt is open", str(path),
+            "PGPCrypt/Vault notes and settings")
+        external_snapshot = path.read_bytes()
+        peer.sequence += 1
+        peer.child.stdin.write(json.dumps(dict(id=peer.sequence, op="notes_set",
+                                              text="stale update must fail")) + "\n")
+        peer.child.stdin.flush()
+        rejected = json.loads(peer.child.stdout.readline())
+        assert not rejected["ok"] and "changed outside PGPCrypt" in rejected["error"]
+        assert path.read_bytes() == external_snapshot
+        assert peer.request("notes_get")["text"] == "edited in KeePassXC"
+        peer.lock()
+        peer = Peer()
+        peer.request("open", path=str(path), password=PASS)
+        assert peer.request("notes_get")["text"] == "external update while PGPCrypt is open"
         peer.request("notes_set", text="saved again by PGPCrypt")
         snapshot = path.read_bytes()
         peer.request("convert_copy", path=str(age), password=PASS, format="age")
         assert path.read_bytes() == snapshot
         peer.lock()
+        assert run("show", "-q", "-a", "Notes", str(path), key_entry).strip() == "my portable key note"
         assert run("show", "-q", "-a", "UserName", str(path), "External entry").strip() == "unrelated fixture"
         assert run("show", "-q", "-s", "-a", "Notes", str(path),
                    "PGPCrypt/Vault notes and settings").strip() == "saved again by PGPCrypt"
@@ -75,7 +95,7 @@ def main():
         assert peer.request("protected_private_export", fingerprint=fingerprint)["text"] == private
         assert peer.request("revocation_export", fingerprint=fingerprint)["text"] == ticket
         peer.lock()
-    print("KDBX interoperability passed: protected keys/revocation, KeePassXC edits, unrelated entries, age conversion")
+    print("KDBX interoperability passed: protected keys/revocation, KeePassXC edits, stale-write refusal, unrelated entries, age conversion")
 
 
 if __name__ == "__main__":

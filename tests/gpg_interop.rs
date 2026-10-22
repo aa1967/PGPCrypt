@@ -75,6 +75,7 @@ fn encrypt_decrypt_and_sign_verify_with_gnupg() -> Result<()> {
     assert_eq!(decrypted.text.as_str(), text);
 
     let signed = pgp::sign(text, &cert, "")?;
+    assert!(signed.starts_with("-----BEGIN PGP SIGNED MESSAGE-----"));
     assert_eq!(
         home.command(&["--decrypt"], signed.as_bytes())?,
         text.as_bytes()

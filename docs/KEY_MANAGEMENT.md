@@ -9,7 +9,7 @@ exported identity; keep private annotations in encrypted vault notes instead.
 | Choice | Key material | Layout |
 | --- | --- | --- |
 | Ed25519 / Cv25519 (default) | Ed25519 signatures, Cv25519 encryption | Primary and separate subkeys |
-| RSA | 2048, 3072 or 4096 bits | Single RSA key, or primary plus RSA signing/encryption subkeys (RSA/RSA) |
+| RSA | 2048 or 4096 bits (creation menu) | Single RSA key, or primary plus RSA signing/encryption subkeys (RSA/RSA) |
 | NIST curves | P-256, P-384 or P-521 ECDSA/ECDH | Primary and separate subkeys |
 
 Creation uses Sequoia's OpenSSL backend and an RFC 4880 compatible certificate
@@ -41,8 +41,9 @@ Private-key passwords are optional and have no minimum length. Leave both
 creation password fields blank to generate a key without a separate password;
 otherwise confirmation must match. The vault still encrypts all stored key
 material. A password you choose also protects exported private-key packets.
-Enter it on the notepad when signing or decrypting; leave that input blank for
-an unprotected key.
+When a signing or decryption key needs its password, a dialog asks for it.
+Unprotected keys proceed directly; imported keys encrypted with an empty password
+can use an empty answer. Passwords are not cached between operations.
 
 **Set / change / remove key password…** adds or changes a key password, or removes
 it when both new fields are blank. Encrypted packets must first unlock with
@@ -54,7 +55,7 @@ Public export never includes secret packets.
 ## Notepad and default key
 
 All text-operation controls are on **Notepad**: recipient checkboxes, signing
-key selector, optional key password, Encrypt, Decrypt, Sign, Verify and Clear.
+key selector, Encrypt, Decrypt, Sign, Verify, Open message, Save output and Clear.
 The key manager handles key creation/import, inspection and backups.
 
 Select a valid private signing key on the notepad and click **Use signing key
@@ -83,12 +84,11 @@ that other people never update.
 
 ## Automatic locking
 
-The session locks after five idle minutes by default. Choose 1, 2, 5, 10, 15,
-30 or 60 minutes and click **Save timeout**. The setting is encrypted in the
-vault and restored at unlock. Focus loss, desktop lock, suspend signals, and
-large timer gaps also lock the session. Lock kills the worker, ends the GUI
-session and starts a fresh locked GUI; unsaved text is discarded. Native desktop
-lock/suspend integration still requires real GNOME/Plasma validation.
+Automatic locking is off by default. **Settings → Preferences** offers optional
+inactivity locking (1–60 minutes), focus-loss locking, and desktop/suspend/Qubes
+host-lock integration. Lock ends both worker and unlocked UI processes; unsaved
+text is discarded. See [Settings](SETTINGS.md) for clipboard clearing and themes.
+Native desktop and Qubes host-lock delivery still need real-system validation.
 
 ## Creating and opening a vault
 
@@ -107,7 +107,7 @@ status. Public-only certificates can be inspected; adding a subkey requires the
 primary private key and certification capability.
 
 Choose **Add subkey…**, then purpose (Encryption, Signing or Authentication),
-algorithm (Cv25519/Ed25519, RSA 2048/3072/4096 or NIST curves) and an optional
+algorithm (Cv25519/Ed25519, RSA 2048/4096 or NIST curves) and an optional
 expiry within the primary key lifetime. Enter an optional new subkey password,
 with matching confirmation. If needed, a separate dialog asks for the primary
 key password to certify the new binding. The save is atomic; existing key
@@ -123,10 +123,29 @@ The workflow references [Kleopatra's Add Subkey command](https://github.com/KDE/
 choose purpose/algorithm/expiry, then certify with the primary secret. PGPCrypt
 uses Sequoia's KeyBuilder/SubkeyBuilder rather than a system GnuPG home.
 
-## Alpha7 workspace changes
+## Signing and message files (alpha8)
 
-Automatic locking is now opt-in, and its controls and conversion are in Settings.
-See [SETTINGS.md](SETTINGS.md). The encrypted-notes page is removed while retaining
-its stored contents. The notepad password field is replaced by an on-demand
-password dialog. Earlier descriptions of the fixed focus lock or notes page
-above describe older releases.
+**Sign** creates readable cleartext signatures (`BEGIN PGP SIGNED MESSAGE`).
+The text remains public. Earlier versions used opaque signed messages with a
+`PGP MESSAGE` wrapper; these are also signatures and remain verifiable here.
+**Verify** reports the full signing certificate fingerprint only after successful
+verification. Compare fingerprints over a trusted channel; valid self-signatures
+on a key do not establish its owner's real identity.
+
+Cleartext signing follows OpenPGP text rules: line endings and trailing spaces
+can be normalized. Use another established OpenPGP tool for detached signatures
+on files whose exact bytes must be preserved; that file workflow is not yet
+implemented here.
+
+**Open message…** browses ordinary UTF-8 text/armored message files (up to 4 MiB)
+and loads the input. Encrypt/Sign accept up to 1 MiB of plaintext. **Save output…** writes the result to a chosen file (up to
+4 MiB). Saving a decrypted message writes plaintext outside the vault, and the
+app asks before doing so. These files are not embedded in or protected by the
+vault unless the saved result itself is OpenPGP encrypted. Saving uses an atomic
+replacement and private file permissions. No recent-file list is stored.
+
+For certificates containing several signing keys, unprotected usable signing
+secrets are tried first; otherwise the supplied password is tried against usable
+signing keys. A protected primary does not force a prompt when an unprotected
+signing subkey is available. Certificate-only and encryption-only keys cannot
+sign. Oversized imported password-derivation work is refused before derivation.

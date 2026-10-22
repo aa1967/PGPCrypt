@@ -1,4 +1,4 @@
-# Settings (alpha7)
+# Settings
 
 Unlock a vault, then use **Settings → Preferences**. Preferences stay inside its
 age/KDBX encryption and are copied during conversion. They apply after unlock;
@@ -16,8 +16,14 @@ the locked landing screen uses the default light theme.
   a later copy from another application is left alone. When enabled, manual
   lock also clears owned clipboard content because the UI process then exits.
   Clipboard managers, other qubes and operating-system history may retain copies.
-- **Theme**: Light, Dark or Solarized, saved per vault and applied after unlock.
-- **Qubes RPC**: off by default. See QUBES.md for services and required dom0 policy.
+- **Theme**: Light, Warm light, Dark, Nord, Solarized light or Solarized dark,
+  saved per vault and applied after unlock. The older Solarized setting keeps
+  its dark appearance.
+- **Requests from other Qubes**: off by default. Lets an unlocked vault receive
+  signing/decryption requests, with local approval for each request. A separate
+  named-client policy in dom0 is required. Decrypted text goes back to the
+  approved qube. Enabling this setting does not create that policy. See
+  [Qubes setup](QUBES.md).
 
 **Settings → Save converted vault copy…** writes a separate encrypted destination
 with a confirmed password and preserves the original. The Preferences dialog

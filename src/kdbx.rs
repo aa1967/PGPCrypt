@@ -278,11 +278,19 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
                     .get("OpenPGP.PublicKey")
                     .context("Missing public key")?;
                 let public = pgp::parse(public.as_bytes())?;
+                ensure!(
+                    !public.is_tsk(),
+                    "KDBX public-key field contains private material"
+                );
                 let private = entry.get("OpenPGP.PrivateKey").unwrap_or_default();
                 let cert = if private.is_empty() {
                     public.clone()
                 } else {
                     let private = pgp::parse(private.as_bytes())?;
+                    ensure!(
+                        private.is_tsk(),
+                        "KDBX private-key field has no private material"
+                    );
                     ensure!(
                         private.fingerprint() == public.fingerprint(),
                         "KDBX public/private key mismatch"
@@ -329,17 +337,26 @@ fn set_key(entry: &mut Entry, bytes: &[u8], data: &VaultData) -> Result<()> {
     let fingerprint = cert.fingerprint().to_hex();
     entry.set_unprotected(
         "Title",
-        cert.userids()
-            .next()
+        cert.with_policy(&sequoia_openpgp::policy::StandardPolicy::new(), None)
+            .ok()
+            .and_then(|valid| valid.userids().revoked(false).next())
             .map(|u| String::from_utf8_lossy(u.userid().value()).into_owned())
             .unwrap_or_else(|| fingerprint.clone()),
     );
     entry.set_unprotected(MARKER, "key");
     entry.set_unprotected(SCHEMA, "1");
     entry.set_unprotected("OpenPGP.Fingerprint", &fingerprint);
+    // KeePassXC shows standard Notes immediately. Keep user-edited notes on
+    // existing entries, and put the portable armor in protected custom fields.
+    if entry.get("Notes").is_none() {
+        entry.set_unprotected(
+            "Notes",
+            "Open the Advanced tab to reveal and copy OpenPGP.PublicKey, OpenPGP.PrivateKey or OpenPGP.Revocation into another OpenPGP application. A private-key password, if set, is separate from the database password. Keep private keys and revocation certificates confidential.",
+        );
+    }
     entry.set_protected("OpenPGP.PublicKey", pgp::public_armor(&cert)?);
-    // Even imported unprotected packets remain protected by the KDBX container
-    // and protected custom field; production-generated packets are also encrypted.
+    // Unprotected private packets remain protected by the KDBX container and
+    // protected custom field. A separate packet password is optional.
     let private = if cert.is_tsk() {
         use sequoia_openpgp::serialize::Serialize;
         let mut b = Vec::new();
@@ -464,6 +481,28 @@ mod tests {
             .unwrap();
         assert!(entry.fields["OpenPGP.PrivateKey"].is_protected());
         assert!(entry.fields["OpenPGP.Revocation"].is_protected());
+        assert!(entry.get("Notes").unwrap().contains("Advanced"));
+        for field in ["OpenPGP.PublicKey", "OpenPGP.PrivateKey"] {
+            let mut malformed = db.clone();
+            malformed.foreach_entry_mut(|mut e| {
+                if e.get(MARKER) == Some("key") {
+                    e.set_protected(
+                        field,
+                        if field == "OpenPGP.PublicKey" {
+                            pgp::private_armor(&cert).unwrap().to_string()
+                        } else {
+                            pgp::public_armor(&cert).unwrap()
+                        },
+                    );
+                }
+            });
+            let mut snapshot = Vec::new();
+            malformed.save(&mut snapshot, DatabaseKey::new().with_password(PASS))?;
+            assert!(
+                open(&snapshot, PASS).is_err(),
+                "mixed public/private field: {field}"
+            );
+        }
         // Earlier PGPCrypt KDBX settings lack the default-key field.
         let mut old_db = db.clone();
         old_db.foreach_entry_mut(|mut entry| {
