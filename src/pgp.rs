@@ -876,12 +876,13 @@ mod tests {
         assert!(signed.contains("\n- -dash escaped line\n"));
         assert!(signed.contains("-----BEGIN PGP SIGNATURE-----"));
         assert!(!signed.contains("-----BEGIN PGP MESSAGE-----"));
-        // RFC 9580's cleartext framework ignores trailing spaces/tabs and its
-        // final separator newline. This is intentionally not byte-preserving.
+        // RFC 9580's cleartext framework ignores trailing spaces/tabs. The
+        // generated armor preserves this input's final LF; a separate test
+        // below covers input without a final LF. This is not byte-preserving.
         let verified = verify(&signed, vec![cert.clone()])?;
         assert_eq!(
             verified.text.as_str(),
-            "Readable UTF-8 — text\n-dash escaped line\nlast line"
+            "Readable UTF-8 — text\n-dash escaped line\nlast line\n"
         );
         assert_eq!(verified.signers, [cert.fingerprint().to_hex()]);
         assert!(
@@ -1126,8 +1127,7 @@ mod tests {
         assert!(decrypt(&ciphertext, vec![public.clone()], "").is_err());
         let signed = sign(input, &alice, "")?;
         let verified = verify(&signed, vec![public])?;
-        // Standard cleartext signatures do not preserve their final newline.
-        assert_eq!(verified.text.as_str(), "Private note — UTF-8 supported");
+        assert_eq!(verified.text.as_str(), input);
         assert_eq!(verified.signers, [alice.fingerprint().to_hex()]);
         assert!(verify(&signed, vec![bob]).is_err());
         assert!(verify(input, vec![alice.clone()]).is_err());
