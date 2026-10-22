@@ -75,3 +75,12 @@ vault and restored at unlock. Focus loss, desktop lock, suspend signals, and
 large timer gaps also lock the session. Lock kills the worker, ends the GUI
 session and starts a fresh locked GUI; unsaved text is discarded. Native desktop
 lock/suspend integration still requires real GNOME/Plasma validation.
+
+## Creating and opening a vault
+
+The start screen offers Create vault, Open vault, and Quit. Create pre-fills
+`~/vault.pgpcrypt.age`, always requires matching password/passphrase fields, and
+shows a local zxcvbn strength estimate while typing. A minimum of 16 characters
+still applies regardless of the estimate. Open uses a file browser and requests
+only the existing vault's password/passphrase. Browse also selects a different
+save location. No recent-vault list or Qt file-dialog history is saved.

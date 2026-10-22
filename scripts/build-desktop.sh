@@ -17,10 +17,12 @@ if [ -f "$qt_root/usr/lib/x86_64-linux-gnu/pkgconfig/Qt6Widgets.pc" ]; then
     qt_flags=$(pkg-config --define-variable="prefix=$qt_root/usr" --cflags --libs Qt6Widgets Qt6DBus)
     qt_rpath="-Wl,-rpath,$qt_root/usr/lib/x86_64-linux-gnu"
     qt_moc="$qt_root/usr/lib/qt6/libexec/moc"
+    strength_flags="-I$qt_root/usr/include -L$qt_root/usr/lib/x86_64-linux-gnu -lzxcvbn"
 else
     qt_flags=$(pkg-config --cflags --libs Qt6Widgets Qt6DBus)
     qt_rpath=""
     qt_moc=$(pkg-config --variable=libexecdir Qt6Core)/moc
+    strength_flags="-lzxcvbn"
 fi
 # Installed packages must resolve Qt from Debian, never a developer workspace.
 if [ "$profile" = release ]; then qt_rpath=""; fi
@@ -29,4 +31,4 @@ if [ "$profile" = release ]; then qt_rpath=""; fi
 # shellcheck disable=SC2086
 g++ -std=c++20 -O2 -Wall -Wextra -Werror -fPIC -fstack-protector-strong \
     -D_FORTIFY_SOURCE=3 -Wl,-z,relro,-z,now -Itarget/qt \
-    desktop/main.cpp -o "target/$profile/pgpcrypt-desktop" $qt_flags $qt_rpath
+    desktop/main.cpp -o "target/$profile/pgpcrypt-desktop" $qt_flags $strength_flags $qt_rpath

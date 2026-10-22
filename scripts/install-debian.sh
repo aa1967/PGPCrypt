@@ -29,15 +29,22 @@ $sudo_cmd apt-get update
 if [ "$1" = --build ]; then
     $sudo_cmd apt-get install -y build-essential pkg-config libssl-dev clang libclang-dev \
         qt6-base-dev qt6-wayland rustc cargo python3 binutils dpkg-dev \
-        desktop-file-utils libsodium-dev age gnupg
+        desktop-file-utils libsodium-dev libzxcvbn-dev age gnupg
     cd "$repo_root"
     ./scripts/build-deb.sh
-    package_version=${PGPCRYPT_PACKAGE_VERSION:-0.1.0~alpha3}
+    package_version=${PGPCRYPT_PACKAGE_VERSION:-0.1.0~alpha4}
     filename_version=$(printf '%s' "$package_version" | tr '~' '.')
     archive="$repo_root/dist/pgpcrypt_${filename_version}_$(dpkg --print-architecture).deb"
 else
     archive=$(realpath -- "$2")
     test -f "$archive"
 fi
-$sudo_cmd apt-get install -y "$archive"
+# _apt cannot traverse many private home directories. Stage only the public
+# package in a fresh readable /tmp directory; never loosen home permissions or
+# disable APT's sandbox to install a local archive.
+apt_stage=$(mktemp -d /tmp/pgpcrypt-apt.XXXXXX)
+trap 'rm -rf "$apt_stage"' EXIT HUP INT TERM
+chmod 755 "$apt_stage"
+install -m 644 -- "$archive" "$apt_stage/pgpcrypt.deb"
+$sudo_cmd apt-get install -y "$apt_stage/pgpcrypt.deb"
 printf '%s\n' "Installed. Run: pgpcrypt"

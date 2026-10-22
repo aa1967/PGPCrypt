@@ -314,7 +314,7 @@ pub fn run(mut input: impl BufRead, mut output: impl Write) -> Result<()> {
         let request: Request = serde_json::from_slice(&frame).context("Invalid IPC request")?;
         let result = match session.handle(&request) {
             Ok(data) => json!({"id":request.id,"ok":true,"data":data}),
-            Err(error) => json!({"id":request.id,"ok":false,"error":error.to_string()}),
+            Err(error) => json!({"id":request.id,"ok":false,"error":format!("{error:#}")}),
         };
         let bytes = Zeroizing::new(serde_json::to_vec(&result)?);
         ensure!(bytes.len() < MAX_FRAME, "IPC response too large");

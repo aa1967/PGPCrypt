@@ -74,9 +74,19 @@ pub struct Vault {
     _lock: File,
 }
 
+fn file_error(error: std::io::Error, operation: &str, path: &Path) -> anyhow::Error {
+    let hint = if error.kind() == std::io::ErrorKind::PermissionDenied {
+        " Choose a folder owned by your user (for example your home folder), and check the permissions of the vault and any existing .lock file. Run PGPCrypt as your normal user."
+    } else {
+        ""
+    };
+    anyhow::Error::new(error).context(format!("Cannot {operation} '{}'.{hint}", path.display()))
+}
+
 pub(crate) fn acquire_lock(path: &Path) -> Result<File> {
     let mut name = path.as_os_str().to_owned();
     name.push(".lock");
+    let lock_path = PathBuf::from(name);
     let file = OpenOptions::new()
         .read(true)
         .write(true)
@@ -84,7 +94,8 @@ pub(crate) fn acquire_lock(path: &Path) -> Result<File> {
         .truncate(false)
         .mode(0o600)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(PathBuf::from(name))?;
+        .open(&lock_path)
+        .map_err(|error| file_error(error, "create or open the vault lock file", &lock_path))?;
     use std::os::fd::AsRawFd;
     // SAFETY: file owns a valid descriptor; closing it releases the advisory lock.
     ensure!(
@@ -101,7 +112,7 @@ pub(crate) fn resolve(path: &Path) -> Result<PathBuf> {
         .unwrap_or(Path::new("."));
     let parent = parent
         .canonicalize()
-        .context("Vault directory does not exist")?;
+        .map_err(|error| file_error(error, "access the vault directory", parent))?;
     Ok(parent.join(path.file_name().context("Choose a vault filename")?))
 }
 
@@ -112,8 +123,25 @@ impl Vault {
             "Use at least 16 characters; prefer randomly chosen words"
         );
         let path = resolve(path)?;
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => {
+                bail!("Choose a vault filename inside the folder, not the folder itself")
+            }
+            Ok(_) => bail!(
+                "Destination already exists; choose a different filename or open the existing vault"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(file_error(error, "check the destination", &path)),
+        }
         let lock = acquire_lock(&path)?;
-        ensure!(!path.try_exists()?, "Destination already exists");
+        ensure!(
+            !path.try_exists().map_err(|error| file_error(
+                error,
+                "check the destination",
+                &path
+            ))?,
+            "Destination already exists; choose a different filename or open the existing vault"
+        );
         let vault = Self {
             data: VaultData::default(),
             path,
@@ -126,11 +154,18 @@ impl Vault {
 
     pub fn open(path: &Path, password: &str) -> Result<Self> {
         let path = resolve(path)?;
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|error| file_error(error, "read the vault file", &path))?;
+        ensure!(
+            metadata.file_type().is_file(),
+            "Choose a regular vault file, not a folder or symbolic link"
+        );
         let lock = acquire_lock(&path)?;
         let mut input = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
-            .open(&path)?;
+            .open(&path)
+            .map_err(|error| file_error(error, "read the vault file", &path))?;
         ensure!(input.metadata()?.is_file(), "Vault must be a regular file");
         let mut bytes = Vec::new();
         Read::by_ref(&mut input)
@@ -195,7 +230,13 @@ impl Vault {
         // JSON whitespace padding is encrypted; this is not an encryption header.
         plaintext.resize(size, b' ');
         let parent = self.path.parent().context("Invalid path")?;
-        let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+        // Obtain the directory handle before committing any ciphertext, so a
+        // directory-permission failure is reported before a vault is created.
+        let directory = File::open(parent)
+            .map_err(|error| file_error(error, "open the vault directory", parent))?;
+        let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
+            file_error(error, "write encrypted data in the vault directory", parent)
+        })?;
         let mut recipient = age::scrypt::Recipient::new(self.passphrase.clone());
         recipient.set_work_factor(WORK_FACTOR);
         let encryptor =
@@ -205,14 +246,16 @@ impl Vault {
         writer.finish()?;
         temp.as_file().sync_all()?;
         if create {
-            temp.persist_noclobber(&self.path).map_err(|e| e.error)?;
+            temp.persist_noclobber(&self.path)
+                .map_err(|e| file_error(e.error, "create the vault file", &self.path))?;
         } else {
             if fs::symlink_metadata(&self.path)?.file_type().is_symlink() {
                 bail!("Refusing symlink destination");
             }
-            temp.persist(&self.path).map_err(|e| e.error)?;
+            temp.persist(&self.path)
+                .map_err(|e| file_error(e.error, "replace the encrypted vault file", &self.path))?;
         }
-        File::open(parent)?.sync_all()?;
+        directory.sync_all()?;
         Ok(())
     }
 

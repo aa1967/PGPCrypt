@@ -7,6 +7,8 @@ import sys
 import tarfile
 import tempfile
 import io
+import pwd
+import json
 
 
 def checked(command, **kwargs):
@@ -32,6 +34,18 @@ def main():
     with tempfile.TemporaryDirectory(prefix="pgpcrypt-package-") as temporary:
         stage = Path(temporary)
         subprocess.run(["dpkg-deb", "-x", str(archive), temporary], check=True)
+        # CI's Debian container is root. Run the installed GUI as an ordinary
+        # user from a package directory that user cannot write, so relative-path
+        # and permission failures cannot be masked by root privileges.
+        child_identity = {}
+        if os.geteuid() == 0:
+            account = pwd.getpwnam("nobody")
+            stage.chmod(0o755)
+            runtime = stage / "runtime"
+            runtime.mkdir(mode=0o700)
+            os.chown(runtime, account.pw_uid, account.pw_gid)
+            settings["XDG_RUNTIME_DIR"] = str(runtime)
+            child_identity = {"user": account.pw_uid, "group": account.pw_gid, "extra_groups": []}
         for name in ("pgpcrypt-desktop", "pgpcrypt-worker", "pgpcrypt-migrate"):
             executable = stage / "usr/lib/pgpcrypt" / name
             assert os.access(executable, os.X_OK), name
@@ -44,10 +58,27 @@ def main():
         assert (stage / "usr/share/doc/pgpcrypt/source.tar.gz").is_file()
         dependencies = checked(["dpkg-deb", "-f", str(archive), "Depends"])
         assert "rustc" not in dependencies and "cargo" not in dependencies and "rustup" not in dependencies
+        assert "libzxcvbn0" in dependencies
         assert (stage / "usr/share/doc/pgpcrypt/third-party-licenses/age-0.12.1").is_dir()
+        denied_folder = stage / "read-only"
+        denied_folder.mkdir()
+        denied_folder.chmod(0o555)
+        denied_path = denied_folder / "blocked.pgpcrypt.age"
+        denied = subprocess.run([str(stage / "usr/lib/pgpcrypt/pgpcrypt-worker")],
+                                input=json.dumps({"id": 1, "op": "create", "path": str(denied_path),
+                                                  "password": "disposable permission fixture"}) + "\n",
+                                env=settings, capture_output=True, text=True, timeout=10, **child_identity)
+        if denied.returncode:
+            raise RuntimeError(denied.stderr)
+        failure = json.loads(denied.stdout)
+        assert failure["ok"] is False and "os error 13" in failure["error"], failure
+        assert "lock file" in failure["error"] and "home folder" in failure["error"], failure
+        assert not denied_path.exists()
+        print("Permission failure identifies the lock file and suggests a writable location.")
         for mode in ("--self-test", "--test-lock-restart"):
             result = subprocess.run([str(stage / "usr/lib/pgpcrypt/pgpcrypt-desktop"), mode],
-                                    env=settings, capture_output=True, text=True, timeout=60)
+                                    env=settings, cwd=stage / "usr/lib/pgpcrypt",
+                                    capture_output=True, text=True, timeout=60, **child_identity)
             if result.returncode:
                 raise RuntimeError(result.stdout + result.stderr)
             print(result.stdout.strip())

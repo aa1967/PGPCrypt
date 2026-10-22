@@ -17,11 +17,11 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends git ca-certificates build-essential pkg-config \
             libssl-dev clang libclang-dev qt6-base-dev qt6-wayland rustc cargo \
-            rustfmt rust-clippy python3 binutils dpkg-dev desktop-file-utils libsodium-dev age gnupg
+            rustfmt rust-clippy python3 binutils dpkg-dev desktop-file-utils libsodium-dev libzxcvbn-dev age gnupg
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - name: Check release version
         if: startsWith(github.ref, 'refs/tags/')
-        run: test "$GITHUB_REF_NAME" = v0.1.0-alpha3
+        run: test "$GITHUB_REF_NAME" = v0.1.0-alpha4
       # These checks run on GitHub after pushing; there are no local Git hooks.
       - name: Check source
         run: |
@@ -33,7 +33,7 @@ jobs:
       - name: Check package and age interoperability
         run: |
           python3 tests/age_interop.py
-          python3 scripts/check-deb.py dist/pgpcrypt_0.1.0.alpha3_amd64.deb
+          python3 scripts/check-deb.py dist/pgpcrypt_0.1.0.alpha4_amd64.deb
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: pgpcrypt-debian13-amd64
@@ -59,6 +59,6 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease \
-            --title "PGPCrypt 0.1.0 alpha3 — Debian 13 amd64" \
-            --notes-file docs/releases/0.1.0-alpha3.md \
-            dist/pgpcrypt_0.1.0.alpha3_amd64.deb dist/SHA256SUMS
+            --title "PGPCrypt 0.1.0 alpha4 — Debian 13 amd64" \
+            --notes-file docs/releases/0.1.0-alpha4.md \
+            dist/pgpcrypt_0.1.0.alpha4_amd64.deb dist/SHA256SUMS

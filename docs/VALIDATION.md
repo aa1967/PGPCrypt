@@ -1,5 +1,13 @@
 # Validation history
 
+## Alpha4 workflow
+
+No tests run before the source push, following the user's workflow preference.
+Post-push checks cover the new start/create flow, live weak/strong estimates,
+matching confirmation, and default-home creation when started in a protected
+package directory. The package checker drops root privileges in Debian CI.
+These results must come from the actual run; source compilation is not a test.
+
 ## Alpha3 workflow
 
 At the user's request, tests are not run locally before committing or pushing.
