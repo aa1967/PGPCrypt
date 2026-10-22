@@ -6,6 +6,7 @@ use crate::{
     vault::{RevocationTicket, Vault, VaultFormat},
 };
 use anyhow::{Context, Result, bail, ensure};
+use sequoia_openpgp::cert::amalgamation::ValidAmalgamation;
 use sequoia_openpgp::{Cert, policy::StandardPolicy, types::RevocationStatus};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -42,6 +43,10 @@ pub struct Request {
     pub idle_timeout_seconds: Option<u32>,
     #[serde(default)]
     pub default_signing_key: Option<String>,
+    #[serde(default)]
+    pub preferences: Option<crate::vault::Preferences>,
+    #[serde(default)]
+    pub subkey_options: Option<pgp::SubkeyOptions>,
 }
 
 #[derive(Default)]
@@ -113,7 +118,7 @@ impl Session {
                     Vault::open(Path::new(&request.path), &request.password)?
                 });
                 Ok(
-                    json!({"unlocked":true,"format":self.vault()?.format().name(),"idle_timeout_seconds":self.vault()?.data.idle_timeout_seconds,"default_signing_key":self.vault()?.data.default_signing_key}),
+                    json!({"unlocked":true,"format":self.vault()?.format().name(),"idle_timeout_seconds":self.vault()?.data.idle_timeout_seconds,"default_signing_key":self.vault()?.data.default_signing_key,"preferences":self.vault()?.data.preferences}),
                 )
             }
             "convert_copy" => {
@@ -199,6 +204,39 @@ impl Session {
                     .context("Select a private key")?;
                 Ok(json!({"text":pgp::protected_private_armor(&cert)?.as_str()}))
             }
+            "subkeys" => {
+                let cert = self
+                    .certs()?
+                    .into_iter()
+                    .find(|c| c.fingerprint().to_hex() == request.fingerprint)
+                    .context("Select a key")?;
+                let policy = StandardPolicy::new();
+                let keys:Vec<_>=cert.keys().with_policy(&policy,None).map(|ka|json!({
+                    "primary":ka.key().fingerprint()==cert.fingerprint(),"fingerprint":ka.key().fingerprint().to_hex(),
+                    "algorithm":ka.key().pk_algo().to_string(),"secret":ka.key().has_secret(),
+                    "capabilities":format!("{:?}",ka.key_flags()),"expires_at":ka.key_expiration_time().and_then(|t|t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d|d.as_secs()),
+                    "status":if matches!(ka.revocation_status(),RevocationStatus::Revoked(_)) {"Revoked"} else if ka.alive().is_err() {"Expired / not yet valid"} else {"Valid"}
+                })).collect();
+                Ok(json!({"keys":keys}))
+            }
+            "add_subkey" => {
+                let cert = self
+                    .certs()?
+                    .into_iter()
+                    .find(|c| c.fingerprint().to_hex() == request.fingerprint)
+                    .context("Select a private key")?;
+                let updated = pgp::add_subkey(
+                    &cert,
+                    request
+                        .subkey_options
+                        .as_ref()
+                        .context("Subkey options required")?,
+                    &request.password,
+                    &request.new_password,
+                )?;
+                self.store(updated)?;
+                Ok(json!({"saved":true}))
+            }
             "private_export" => {
                 let cert = self
                     .certs()?
@@ -256,7 +294,9 @@ impl Session {
             }
             "settings_set" => {
                 ensure!(
-                    request.idle_timeout_seconds.is_some() || request.default_signing_key.is_some(),
+                    request.idle_timeout_seconds.is_some()
+                        || request.default_signing_key.is_some()
+                        || request.preferences.is_some(),
                     "Choose a setting to save"
                 );
                 if let Some(seconds) = request.idle_timeout_seconds {
@@ -293,23 +333,31 @@ impl Session {
                         "Choose a valid private signing key"
                     );
                 }
+                if let Some(preferences) = &request.preferences {
+                    preferences.validate()?;
+                }
                 let vault = self.vault.as_mut().context("Vault is locked")?;
+                let old_preferences = vault.data.preferences.clone();
                 let old_timeout = vault.data.idle_timeout_seconds;
                 let old_default = Zeroizing::new(vault.data.default_signing_key.clone());
                 if let Some(seconds) = request.idle_timeout_seconds {
                     vault.data.idle_timeout_seconds = seconds;
                 }
+                if let Some(preferences) = &request.preferences {
+                    vault.data.preferences = preferences.clone();
+                }
                 if let Some(fp) = &request.default_signing_key {
                     vault.data.default_signing_key = fp.clone();
                 }
                 if let Err(error) = vault.save() {
+                    vault.data.preferences = old_preferences;
                     vault.data.idle_timeout_seconds = old_timeout;
                     vault.data.default_signing_key.zeroize();
                     vault.data.default_signing_key = old_default.to_string();
                     return Err(error);
                 }
                 Ok(
-                    json!({"saved":true,"idle_timeout_seconds":vault.data.idle_timeout_seconds,"default_signing_key":vault.data.default_signing_key}),
+                    json!({"saved":true,"idle_timeout_seconds":vault.data.idle_timeout_seconds,"default_signing_key":vault.data.default_signing_key,"preferences":vault.data.preferences}),
                 )
             }
             "encrypt" => {
@@ -392,7 +440,9 @@ pub fn run(mut input: impl BufRead, mut output: impl Write) -> Result<()> {
         let request: Request = serde_json::from_slice(&frame).context("Invalid IPC request")?;
         let result = match session.handle(&request) {
             Ok(data) => json!({"id":request.id,"ok":true,"data":data}),
-            Err(error) => json!({"id":request.id,"ok":false,"error":format!("{error:#}")}),
+            Err(error) => {
+                json!({"id":request.id,"ok":false,"error":format!("{error:#}"),"code":if error.chain().any(|cause|cause.is::<pgp::PasswordRequired>()) {"password_required"} else {"operation_failed"}})
+            }
         };
         let bytes = Zeroizing::new(serde_json::to_vec(&result)?);
         ensure!(bytes.len() < MAX_FRAME, "IPC response too large");

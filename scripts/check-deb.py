@@ -46,7 +46,7 @@ def main():
             os.chown(runtime, account.pw_uid, account.pw_gid)
             settings["XDG_RUNTIME_DIR"] = str(runtime)
             child_identity = {"user": account.pw_uid, "group": account.pw_gid, "extra_groups": []}
-        for name in ("pgpcrypt-desktop", "pgpcrypt-worker", "pgpcrypt-migrate"):
+        for name in ("pgpcrypt-desktop", "pgpcrypt-worker", "pgpcrypt-migrate", "pgpcrypt-qrexec"):
             executable = stage / "usr/lib/pgpcrypt" / name
             assert os.access(executable, os.X_OK), name
             dynamic = checked(["readelf", "-d", str(executable)])
@@ -56,6 +56,10 @@ def main():
         assert (stage / "usr/share/icons/hicolor/scalable/apps/pgpcrypt.svg").is_file()
         assert "/usr/lib/pgpcrypt/pgpcrypt-desktop" in (stage / "usr/bin/pgpcrypt").read_text()
         assert (stage / "usr/share/doc/pgpcrypt/source.tar.gz").is_file()
+        for service in ("Sign", "Decrypt", "Lock"):
+            handler=stage / ("etc/qubes-rpc/pgpcrypt."+service)
+            assert handler.is_file() and os.access(handler,os.X_OK)
+        assert not (stage / "etc/qubes/policy.d").exists(), "Never install dom0 policy in a guest package"
         dependencies = checked(["dpkg-deb", "-f", str(archive), "Depends"])
         assert "rustc" not in dependencies and "cargo" not in dependencies and "rustup" not in dependencies
         assert "libzxcvbn0" in dependencies

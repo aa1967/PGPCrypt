@@ -98,3 +98,35 @@ shows a local zxcvbn strength estimate while typing. A minimum of 16 characters
 still applies regardless of the estimate. Open uses a file browser and requests
 only the existing vault's password/passphrase. Browse also selects a different
 save location. No recent-vault list or Qt file-dialog history is saved.
+
+## Subkeys (alpha7)
+
+Select a key on **Keys & identities**, then **Manage subkeys…**. The inspector
+shows primary/subkey fingerprints, algorithms, capabilities, expiration and
+status. Public-only certificates can be inspected; adding a subkey requires the
+primary private key and certification capability.
+
+Choose **Add subkey…**, then purpose (Encryption, Signing or Authentication),
+algorithm (Cv25519/Ed25519, RSA 2048/3072/4096 or NIST curves) and an optional
+expiry within the primary key lifetime. Enter an optional new subkey password,
+with matching confirmation. If needed, a separate dialog asks for the primary
+key password to certify the new binding. The save is atomic; existing key
+packets, primary fingerprint, identity and revocation ticket remain intact.
+
+Export and distribute the updated public certificate so other OpenPGP software
+can use the new subkey. Separate subkey revocation and expiry editing are not
+implemented in this version. Bulk private-key password changes still need a
+password that unlocks all protected packets; differently protected subkeys may
+require another OpenPGP tool for password maintenance.
+
+The workflow references [Kleopatra's Add Subkey command](https://github.com/KDE/kleopatra/blob/master/src/commands/addsubkeycommand.cpp): select a certificate,
+choose purpose/algorithm/expiry, then certify with the primary secret. PGPCrypt
+uses Sequoia's KeyBuilder/SubkeyBuilder rather than a system GnuPG home.
+
+## Alpha7 workspace changes
+
+Automatic locking is now opt-in, and its controls and conversion are in Settings.
+See [SETTINGS.md](SETTINGS.md). The encrypted-notes page is removed while retaining
+its stored contents. The notepad password field is replaced by an on-demand
+password dialog. Earlier descriptions of the fixed focus lock or notes page
+above describe older releases.

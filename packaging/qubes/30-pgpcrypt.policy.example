@@ -1,0 +1,8 @@
+# dom0 ONLY: replace these exact qube names. Review before installing.
+# Put earlier than any broad local allow/ask policy. No wildcard allow rules.
+pgpcrypt.Sign + work-mail pgp-vault ask user=user
+pgpcrypt.Decrypt + work-mail pgp-vault ask user=user
+pgpcrypt.Lock + dom0 pgp-vault allow user=user
+pgpcrypt.Sign * @anyvm @anyvm deny
+pgpcrypt.Decrypt * @anyvm @anyvm deny
+pgpcrypt.Lock * @anyvm @anyvm deny

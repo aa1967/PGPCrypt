@@ -1,0 +1,4 @@
+#!/bin/sh
+# dom0 hook example. Set the exact vault qube; attach to your existing locker.
+# Does not start a stopped qube and does not unlock or execute shell in it.
+exec qvm-run --no-autostart --pass-io --service --user user pgp-vault pgpcrypt.Lock </dev/null

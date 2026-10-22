@@ -342,3 +342,135 @@ fn optional_key_passwords_and_default_survive_reopen_and_conversion() -> Result<
     }
     Ok(())
 }
+
+#[test]
+fn preferences_subkeys_and_password_requests_roundtrip() -> Result<()> {
+    for format in ["age", "kdbx"] {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join(format!("settings.{format}"));
+        let copy = dir.path().join("converted");
+        let vault_password = "disposable settings vault password";
+        let mut peer = Peer::new()?;
+        let opened = peer.ok(
+            "create",
+            json!({"path":path,"password":vault_password,"format":format}),
+        )?;
+        assert_eq!(opened["preferences"]["auto_lock"], false);
+        assert_eq!(opened["preferences"]["lock_on_focus_loss"], false);
+        assert_eq!(opened["preferences"]["lock_on_session_events"], false);
+        assert_eq!(opened["preferences"]["clipboard_clear_seconds"], 0);
+        assert_eq!(opened["preferences"]["qubes_rpc"], false);
+        for invalid in [
+            json!({"theme":"unknown"}),
+            json!({"clipboard_clear_seconds":4}),
+            json!({"clipboard_clear_seconds":1801}),
+        ] {
+            assert_eq!(
+                peer.raw("settings_set", json!({"preferences":invalid}))?["ok"],
+                false
+            );
+        }
+        let preferences = json!({"auto_lock":true,"lock_on_focus_loss":false,"lock_on_session_events":true,"clipboard_clear_seconds":1800,"theme":"solarized","qubes_rpc":false});
+        peer.ok(
+            "settings_set",
+            json!({"preferences":preferences,"idle_timeout_seconds":3600}),
+        )?;
+        peer.ok("generate",json!({"password":"x","key_options":{
+            "name":"Subkey fixture","algorithm":"cv25519","layout":"subkeys","signing":false,"certification":true,"transport_encryption":false,"storage_encryption":false,"expires_at":null
+        }}))?;
+        let fp = peer.ok("list", json!({}))?["keys"][0]["fingerprint"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let before = peer.ok("subkeys", json!({"fingerprint":fp}))?;
+        assert_eq!(before["keys"].as_array().unwrap().len(), 1);
+        let options = json!({"purpose":"sign","algorithm":"cv25519","expires_at":null});
+        let denied = peer.raw(
+            "add_subkey",
+            json!({"fingerprint":fp,"subkey_options":options,"new_password":"y"}),
+        )?;
+        assert_eq!(denied["code"], "password_required");
+        peer.ok(
+            "add_subkey",
+            json!({"fingerprint":fp,"password":"x","subkey_options":options,"new_password":"y"}),
+        )?;
+        let missing = peer.raw("sign", json!({"fingerprint":fp,"text":"prompt fixture"}))?;
+        assert_eq!(missing["code"], "password_required");
+        peer.ok(
+            "sign",
+            json!({"fingerprint":fp,"password":"y","text":"new signing subkey fixture"}),
+        )?;
+        peer.ok("add_subkey",json!({"fingerprint":fp,"password":"x","subkey_options":{"purpose":"encrypt","algorithm":"cv25519","expires_at":null}}))?;
+        let encrypted = peer.ok(
+            "encrypt",
+            json!({"recipients":[fp],"text":"new decryption subkey"}),
+        )?;
+        assert_eq!(
+            peer.ok("decrypt", json!({"text":encrypted["text"]}))?["text"],
+            "new decryption subkey"
+        );
+        let after = peer.ok("subkeys", json!({"fingerprint":fp}))?;
+        assert_eq!(after["keys"].as_array().unwrap().len(), 3);
+        peer.ok(
+            "notes_set",
+            json!({"text":"retained notes from hidden page"}),
+        )?;
+        peer.ok("convert_copy",json!({"path":copy,"password":vault_password,"format":if format=="age" {"kdbx"} else {"age"}}))?;
+        peer.ok("lock", json!({}))?;
+        assert!(peer.child.wait()?.success());
+        let mut reopened = Peer::new()?;
+        let data = reopened.ok("open", json!({"path":copy,"password":vault_password}))?;
+        assert_eq!(data["preferences"], preferences);
+        assert_eq!(data["idle_timeout_seconds"], 3600);
+        assert_eq!(
+            reopened.ok("subkeys", json!({"fingerprint":fp}))?["keys"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(
+            reopened.ok("notes_get", json!({}))?["text"],
+            "retained notes from hidden page"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn qrexec_adapter_refuses_unbound_services_and_request_privileges() -> Result<()> {
+    for (service, domain, body) in [
+        (
+            "Sign",
+            "work-mail",
+            "{\"operation\":\"open\",\"version\":1,\"path\":\"/tmp/private\"}\n",
+        ),
+        (
+            "Sign",
+            "work-mail",
+            "{\"operation\":\"decrypt\",\"version\":1,\"text\":\"ciphertext\"}\n",
+        ),
+        (
+            "Decrypt",
+            "dom0",
+            "{\"operation\":\"decrypt\",\"version\":1,\"text\":\"ciphertext\"}\n",
+        ),
+        ("Lock", "work-mail", ""),
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_pgpcrypt-qrexec"))
+            .arg(service)
+            .env("QREXEC_REMOTE_DOMAIN", domain)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        child.stdin.take().unwrap().write_all(body.as_bytes())?;
+        let output = child.wait_with_output()?;
+        assert!(!output.status.success());
+        assert!(output.stderr.is_empty());
+        let result: Value = serde_json::from_slice(&output.stdout)?;
+        assert_eq!(result["ok"], false);
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("/tmp/private"));
+    }
+    Ok(())
+}

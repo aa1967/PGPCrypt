@@ -1,112 +1,116 @@
-# Qubes 4.3: Debian 13 StandaloneVM evaluation
+# Qubes 4.3: Debian 13 StandaloneVM
 
-The current target is a Debian 13 amd64 StandaloneVM. Neither a real Qubes
-session nor dom0 lock propagation has been tested by this cloud build.
-PGPCrypt runs entirely inside the guest. It does not currently provide Split
-GPG, a qrexec service, or automatic dom0 screen-lock integration.
+Alpha7 implements opt-in qrexec signing/decryption and a separate dom0-only lock
+service. The cloud checks exercise the local broker and adapter rejection paths;
+a real Qubes 4.3 guest, policy prompts, inter-qube transport and host lock/suspend
+still require testing. This protocol is PGPCrypt-specific, not Split GPG 2 or a
+GnuPG/gpg-agent replacement.
 
-## Install and isolate
+## Guest installation
 
-Use a dedicated, persistent StandaloneVM, for example `pgp-vault`. Download the
-`.deb` and SHA256SUMS in a download qube, then transfer them using Qubes file
-copy. Verify the checksum in the destination. Install the package and its Debian
-runtime dependencies as root while updates are available. No Rust compiler is
-needed for the compiled package.
+Use a dedicated persistent Debian 13 amd64 StandaloneVM, such as `pgp-vault`.
+Download the `.deb` and SHA256SUMS in a download qube, transfer both through Qubes
+file copy, verify the checksum, then install with APT in the vault qube.
+No Rust compiler is needed. In a minimal guest without sudo, open a root guest
+terminal from dom0 using `qvm-run -u root pgp-vault xterm`; run APT there, then
+launch `pgpcrypt` separately as the ordinary guest user. Keep vaults under that
+user's home, such as `/home/user/vault.kdbx`. `/database` normally belongs to
+root and gives permission denied.
 
-For a minimal guest without sudo, open a root terminal from dom0 using the
-existing Qubes tools (substitute your qube name):
+Keep the vault qube offline after dependency installation, with a planned Qubes
+update workflow. Start evaluation with at least 1 GiB guest RAM (guidance, not a
+measured minimum); age's KDF alone uses about 256 MiB. Keep backups and avoid
+using a DisposableVM for the only database copy. Install nothing from this
+project in dom0 except a reviewed policy and, optionally, the small lock hook.
 
-```sh
-qvm-run -u root pgp-vault xterm
+## Enable remote operations
+
+1. Install alpha7 in the vault qube. The package provides the root-owned
+   `/etc/qubes-rpc/pgpcrypt.Sign`, `.Decrypt` and `.Lock` handlers and a narrow
+   Rust adapter. It installs no dom0 policy or host-lock hooks.
+2. Unlock the vault and enable **Settings → Preferences → Enable Qubes RPC**.
+   The user must have a private `/run/user/UID` directory, owned by that user and
+   mode 0700, normally created by logind. The broker socket lives in its private
+   `pgpcrypt` subdirectory. Only one enabled broker may run per guest user.
+3. Review `packaging/qubes/30-pgpcrypt.policy.example`, replace the exact qube
+   names and user if needed, and install it as a policy in dom0. Its named
+   `work-mail → pgp-vault` rules ask for Sign/Decrypt; Lock allows dom0 only;
+   remaining callers/arguments are denied. Place these rules before any broad
+   local allow/ask rule. Do not replace them with wildcard allow rules.
+4. In a client qube, feed one JSON line to `qrexec-client-vm pgp-vault
+   pgpcrypt.Sign` or `.Decrypt`, close stdin, then read its one-line JSON reply.
+   Version 1 request examples:
+
+```json
+{"version":1,"operation":"sign","fingerprint":"FULL_40_OR_64_HEX_FINGERPRINT","text":"Text to sign"}
+{"version":1,"operation":"decrypt","text":"-----BEGIN PGP MESSAGE-----\n..."}
 ```
 
-In that guest root terminal (replace the package path with its transferred path):
+These examples describe the data format; the placeholder fingerprint must be
+replaced with the full fingerprint of a valid private signing key in the vault.
+A successful response is `{"ok":true,"data":{...}}`; failed/denied requests
+return a generic error without key, path or request details. Callers never send
+key/vault passwords, paths, import/export requests or identity-enumeration
+commands. The service name must match the JSON operation; service arguments are
+forbidden. Client input must reach EOF within 10 seconds and fit one 1 MiB JSON
+line. Responses are bounded at 8 MiB, with a 90-second adapter read timeout.
+
+The GUI shows the qrexec-authenticated source qube, operation, signing
+fingerprint and full signing/ciphertext content, and asks for approval. Policy
+approval alone does not authorize crypto. Decrypted plaintext goes to that
+approved client, which can retain it. Password prompts appear locally and are
+never returned to the client. Cancel/timeout/lock prevents result release. A
+client disconnect cancels pending prompts; already-running worker operations may
+finish, but their result is discarded. Lock kills the worker.
+
+## Optional host-lock forwarding
+
+In Settings enable **Lock on desktop lock / suspend / Qubes host-lock requests**
+and enable Qubes RPC. With the named dom0 policy installed, the following dom0
+command requests lock without shell execution in the guest or starting a stopped
+qube:
 
 ```sh
-apt update
-install -m 644 /home/user/QubesIncoming/DOWNLOAD-QUBE/pgpcrypt_0.1.0.alpha6_amd64.deb /tmp/pgpcrypt.deb
-apt install /tmp/pgpcrypt.deb
-rm /tmp/pgpcrypt.deb
+qvm-run --no-autostart --pass-io --service --user user pgp-vault pgpcrypt.Lock </dev/null
 ```
 
-Close the root terminal and launch `pgpcrypt` as the ordinary guest user.
-Create the vault inside that user's home, for example `/home/user/vault.kdbx`.
-`/database` is a root-owned filesystem location and normally gives permission
-denied. Use a persistent vault qube; a DisposableVM is unsuitable for the only
-copy of a database. Never install the app, its build tools or vault in dom0.
+`packaging/qubes/lock-vault.example` contains this command as a hook. Configure
+it with the existing dom0 locker/suspend mechanism only after testing it. No
+automatic locker modification is installed. Guest logind signals do not imply
+dom0 notifications; verify your actual locker and suspend paths. If the GUI is
+busy or unavailable, verify lock by closing/shutting down the qube before
+assuming the keys have left RAM. Saved/paused VM state can retain unlocked RAM.
 
-After dependency installation, disconnect the vault qube's NetVM through Qube
-Settings. Keep updating it through an appropriate Qubes maintenance workflow.
-Start evaluation with at least 1 GiB assigned RAM: age's KDF alone needs about
-256 MiB; Qt, Rust and the guest require additional memory. This is guidance, not
-a measured minimum. A minimal Debian guest needs Qubes GUI integration working;
-the package pulls Qt's runtime libraries, not the full GNOME/KDE desktop.
-Template-based deployment can follow later: install software in the template,
-but keep personal vaults in the AppVM home, never in the shared template.
+All automatic lock modes and clipboard clearing are off by default. Settings
+provides inactivity (1–60 minutes), focus-loss and session-lock controls. Switching
+qubes therefore no longer immediately locks the default configuration. Qubes
+clipboard transfers remain outside PGPCrypt's clipboard ownership once copied;
+its optional wipe cannot remove copies in another qube, dom0 or a clipboard
+manager.
 
-## Current lock and clipboard behavior
+## Trust and validation boundaries
 
-Inactivity (default five minutes), guest session/screen lock, guest suspend and
-loss of application focus close the session and kill its worker. A timer gap
-over 15 seconds also locks. Unsaved editor/notes content is discarded on lock.
-Guest logind/screensaver signals do **not** guarantee notification of dom0 lock
-or host suspend. Explicitly lock PGPCrypt before locking the host or pausing,
-saving or suspending the qube. VM saved state can contain unlocked process RAM;
-a vault's file encryption does not encrypt the rest of a VM's saved memory.
+Qrexec supplies `QREXEC_REMOTE_DOMAIN`; no client JSON field can choose it. The
+adapter and GUI verify same-UID Unix socket peers and private directory ownership.
+The whole vault guest and its same-user software are trusted: a compromised
+process there can forge local requests or environments and interfere with GUI
+input. The adapter's inherited qrexec identity is meaningful across qube
+boundaries, not an isolation boundary against other code already inside this
+trusted guest. Keep general browsing/download tools in a separate qube.
 
-Qubes clipboard transfer needs evaluation with focus locking enabled. For
-outgoing text: copy within PGPCrypt, press Ctrl+Shift+C while it is still focused,
-switch to the destination, then Ctrl+Shift+V and paste. Switching away locks
-PGPCrypt. Incoming transfer requires reopening/unlocking as needed. Clipboard
-contents already copied outside the process cannot be retracted by locking.
-Avoid transferring keys or revocation tickets through everyday client qubes.
+No request can open/unlock a vault, export private keys or list identities.
+The GUI accepts one crypto request at a time, caps concurrent connections at four and crypto approval prompts at one per
+second, uses a five-second local input deadline and a 60-second approval
+prompt deadline. Remote requests do not grant a general worker interface.
+Lock requests are independent of crypto queue approval and accepted from dom0
+only when their setting is enabled. Subkey/key management is local-only.
 
-## qrexec preparation in alpha6
+Before relying on it, test policy denial, source names, approval/rejection,
+password/cancel flows, locked denial, input deadlines, disconnects, concurrency,
+and dom0 lock/suspend on Qubes 4.3. This work is not an independent security audit.
 
-`src/qubes.rs` defines a separate versioned request decoder for future `sign`
-and `decrypt` RPCs. It accepts one JSON line up to 1 MiB, validates full signing
-fingerprints, rejects unknown fields/operations and has no password, vault path,
-import, export, settings or key-enumeration operation. It does **not** execute
-requests or connect clients to the desktop worker. No RPC handler or policy is
-installed by the package; enabling access requires the following further work.
-
-1. A per-user local broker must bind to the unlocked GUI's lifetime and a private
-   runtime directory. Locked/unavailable sessions refuse requests; remote calls
-   cannot unlock or select a vault. Never expose the worker stdin protocol.
-2. A thin qrexec adapter obtains the authenticated client identity from qrexec's
-   `QREXEC_REMOTE_DOMAIN` environment. The JSON never supplies the domain. Do not
-   accept arbitrary environment claims through a general local invocation.
-3. Separate services `pgpcrypt.Sign` and `pgpcrypt.Decrypt` bind the service to the
-   allowed operation; service arguments are disallowed. No shell expansion,
-   caller-controlled filenames or command templates. Read exactly one bounded
-   frame, wait for EOF with a deadline, bound output, cancel on disconnect, and
-   serialize requests. Enforce an overall deadline/rate limit as well as size.
-4. Policy first denies all clients. An administrator may add narrowly scoped
-   `ask` rules for named client and vault qubes; no wildcard allow rule. Local
-   GUI confirmation must independently show the qrexec-authenticated caller,
-   operation, key fingerprint and signing content. A policy prompt is not a
-   substitute for approving the cryptographic operation. Key passwords are
-   entered locally in the vault GUI only. UI cancellation, timeout or lock
-   prevents execution/release of results. Decryption returns plaintext to the
-   approved client; a malicious approved client can retain it.
-5. A separate authenticated lock-only route can later propagate dom0 lock and
-   suspend events. It must only terminate sessions, never unlock or run crypto,
-   and must work when the GUI event loop is busy. Do not claim host lock support
-   until tested on Qubes 4.3 with a running operation and pending prompt.
-
-This is a dedicated vault protocol, not GnuPG's gpg-agent wire protocol.
-Qubes Split GPG 2 expects GnuPG/gpg-agent and does not directly provide this
-application's metadata-hidden-while-locked vault behavior. Fingerprints,
-recipient IDs, signatures, file sizes and activity timing can still be visible
-outside the vault during approved operations.
-
-Before installing any future RPC handler, verify locked denial; caller identity
-spoofing rejection; policy denial; every local approval/cancel path; oversized,
-truncated and stalled input; concurrent clients; lock during requests; guest and
-dom0 suspend/lock; and that no plaintext logs or temporary files are produced.
-
-Official references:
-- [Qubes qrexec](https://www.qubes-os.org/doc/qrexec/)
-- [Qrexec policy](https://www.qubes-os.org/doc/qrexec-policy/)
-- [Minimal templates](https://www.qubes-os.org/doc/templates/minimal/)
+References:
+- [Qubes qrexec implementation and environment](https://github.com/QubesOS/qubes-doc/blob/main/developer/services/qrexec.rst)
+- [Qubes policy documentation](https://github.com/QubesOS/qubes-doc/blob/main/user/advanced-topics/rpc-policy.rst)
+- [qvm-run service mode](https://github.com/QubesOS/qubes-core-admin-client/blob/main/qubesadmin/tools/qvm_run.py)
 - [Split GPG 2](https://github.com/QubesOS/qubes-app-linux-split-gpg2)

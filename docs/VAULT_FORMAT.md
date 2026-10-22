@@ -1,4 +1,4 @@
-# Vault format: age v1 plus encrypted schema 3
+# Vault format: age v1 plus encrypted schema 4
 
 The outer container is the unmodified [age v1 format](https://age-encryption.org/v1),
 implemented by `age` 0.12.1. The app defines no crypto header, nonce format,
@@ -20,13 +20,21 @@ After complete authenticated decryption, the plaintext is UTF-8 JSON:
 ```json
 {
   "application": "PGPCrypt",
-  "schema": 3,
+  "schema": 4,
   "data": {
     "certificates": [],
     "notes": "",
     "revocations": [],
     "idle_timeout_seconds": 300,
-    "default_signing_key": ""
+    "default_signing_key": "",
+    "preferences": {
+      "auto_lock": false,
+      "lock_on_focus_loss": false,
+      "lock_on_session_events": false,
+      "clipboard_clear_seconds": 0,
+      "theme": "light",
+      "qubes_rpc": false
+    }
   }
 }
 ```
@@ -38,9 +46,12 @@ revocation signatures are kept separate from the certificates so storing a ticke
 does not apply it. `idle_timeout_seconds` ranges from 60 to 3600.
 
 Schema-1 vaults are read with empty revocations and a 300-second timeout.
-Schemas 1 and 2 default to no saved signing key. Every save writes schema 3,
-which adds the encrypted `default_signing_key` fingerprint (empty means none).
-Older PGPCrypt releases reject schema 3; preserve a backup before upgrading. Unknown fields and unsupported versions are rejected.
+Schemas 1 and 2 default to no saved signing key. Schemas 1–3 default to all
+automatic locking, clipboard wiping and RPC options off. Every save writes
+schema 4 with encrypted preferences. `default_signing_key` is empty for no
+default; inactivity duration remains 60–3600 seconds but has no effect until
+`preferences.auto_lock` is enabled. Clipboard delay is 0 (off) or 5–1800 seconds.
+Older PGPCrypt releases reject schema 4; preserve a backup before upgrading. Unknown fields and unsupported versions are rejected.
 The schema version is private, separate from the public age format version.
 
 The writer pads JSON with spaces to a 4096-byte boundary inside encryption.

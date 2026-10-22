@@ -99,7 +99,7 @@ def main():
 
         terminal_command([age, "--decrypt", "--output", str(plaintext), str(original)])
         decoded = json.loads(plaintext.read_text())
-        assert decoded["application"] == "PGPCrypt" and decoded["schema"] == 3
+        assert decoded["application"] == "PGPCrypt" and decoded["schema"] == 4
         assert decoded["data"]["notes"] == "independent age compatibility fixture"
         assert len(decoded["data"]["certificates"]) == 1
 
@@ -110,9 +110,11 @@ def main():
         assert peer.request("list")["keys"][0]["fingerprint"] == fingerprint
         peer.lock()
         # Recreate the previous age schemas using the independent writer.
-        for schema in (2, 1):
+        for schema in (3, 2, 1):
             decoded["schema"] = schema
-            decoded["data"].pop("default_signing_key", None)
+            decoded["data"].pop("preferences", None)
+            if schema < 3:
+                decoded["data"].pop("default_signing_key", None)
             if schema == 1:
                 decoded["data"].pop("revocations", None)
                 decoded["data"].pop("idle_timeout_seconds", None)
@@ -122,9 +124,10 @@ def main():
             peer = Peer()
             settings = peer.request("open", path=str(previous), password=PASS)
             assert settings["default_signing_key"] == ""
+            assert settings["preferences"]["auto_lock"] is False
             assert peer.request("list")["keys"][0]["fingerprint"] == fingerprint
             peer.lock()
-    print("age interoperability passed: Rust vault -> Debian age -> Rust vault; schemas 1/2/3")
+    print("age interoperability passed: Rust vault -> Debian age -> Rust vault; schemas 1/2/3/4")
 
 
 if __name__ == "__main__":

@@ -24,6 +24,51 @@ pub struct RevocationTicket {
     pub armor: String,
 }
 
+#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
+pub struct Preferences {
+    #[serde(default)]
+    pub auto_lock: bool,
+    #[serde(default)]
+    pub lock_on_focus_loss: bool,
+    #[serde(default)]
+    pub lock_on_session_events: bool,
+    #[serde(default)]
+    pub clipboard_clear_seconds: u32,
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    #[serde(default)]
+    pub qubes_rpc: bool,
+}
+fn default_theme() -> String {
+    "light".into()
+}
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            auto_lock: false,
+            lock_on_focus_loss: false,
+            lock_on_session_events: false,
+            clipboard_clear_seconds: 0,
+            theme: "light".into(),
+            qubes_rpc: false,
+        }
+    }
+}
+impl Preferences {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.clipboard_clear_seconds == 0 || (5..=1800).contains(&self.clipboard_clear_seconds),
+            "Clipboard interval must be disabled or 5 seconds to 30 minutes"
+        );
+        ensure!(
+            matches!(self.theme.as_str(), "light" | "dark" | "solarized"),
+            "Unsupported theme"
+        );
+        Ok(())
+    }
+}
+
 #[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 #[serde(deny_unknown_fields)]
 pub struct VaultData {
@@ -35,6 +80,8 @@ pub struct VaultData {
     pub idle_timeout_seconds: u32,
     #[serde(default)]
     pub default_signing_key: String,
+    #[serde(default)]
+    pub preferences: Preferences,
 }
 
 fn default_timeout() -> u32 {
@@ -49,6 +96,7 @@ impl Default for VaultData {
             revocations: Vec::new(),
             idle_timeout_seconds: default_timeout(),
             default_signing_key: String::new(),
+            preferences: Preferences::default(),
         }
     }
 }
@@ -251,13 +299,14 @@ impl Vault {
         // No decoded data is exposed until the complete age stream authenticates.
         let stored: Stored = serde_json::from_slice(&plaintext).context("Invalid vault schema")?;
         ensure!(
-            stored.application == "PGPCrypt" && matches!(stored.schema, 1..=3),
+            stored.application == "PGPCrypt" && matches!(stored.schema, 1..=4),
             "Unsupported vault schema"
         );
         ensure!(
             (60..=3600).contains(&stored.data.idle_timeout_seconds),
             "Unsupported idle timeout"
         );
+        stored.data.preferences.validate()?;
         Ok(Self {
             data: stored.data,
             path,
@@ -297,7 +346,7 @@ impl Vault {
     fn write(&self, create: bool) -> Result<()> {
         let mut plaintext = Zeroizing::new(serde_json::to_vec(&StoredRef {
             application: "PGPCrypt",
-            schema: 3,
+            schema: 4,
             data: &self.data,
         })?);
         let size = plaintext.len().div_ceil(PAD) * PAD;

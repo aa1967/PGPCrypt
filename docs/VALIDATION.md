@@ -1,5 +1,13 @@
 # Validation history
 
+## Alpha7 workflow
+
+Source is pushed before tests. Checks add preference defaults/bounds/conversion,
+subkey creation/use, structured password prompts, Qubes adapter rejection and
+local broker approval/denial, plus both packaged desktop workflows. Actual
+results are recorded after execution; real Qubes transport/host events and
+clipboard/compositor behavior need VM evaluation.
+
 ## Alpha6 evidence
 
 Functional source at `ee740b8` was pushed before tests. All 22 Rust tests passed

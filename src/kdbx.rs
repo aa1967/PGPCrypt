@@ -249,7 +249,8 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
     for entry in group.entries() {
         ensure!(
             entry.get(SCHEMA) == Some("1")
-                || (entry.get(MARKER) == Some("settings") && entry.get(SCHEMA) == Some("2")),
+                || (entry.get(MARKER) == Some("settings")
+                    && matches!(entry.get(SCHEMA), Some("2" | "3"))),
             "Unsupported PGPCrypt KDBX entry schema"
         );
         match entry.get(MARKER) {
@@ -260,6 +261,12 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
                     .get("PGPCrypt.DefaultSigningKey")
                     .unwrap_or_default()
                     .to_owned();
+                data.preferences = entry
+                    .get("PGPCrypt.Preferences")
+                    .map(serde_json::from_str)
+                    .transpose()?
+                    .unwrap_or_default();
+                data.preferences.validate()?;
                 data.notes = entry.get("Notes").unwrap_or_default().to_owned();
                 data.idle_timeout_seconds = entry
                     .get("PGPCrypt.IdleTimeoutSeconds")
@@ -392,7 +399,11 @@ pub fn write(
             };
             settings.set_unprotected("Title", "Vault notes and settings");
             settings.set_unprotected(MARKER, "settings");
-            settings.set_unprotected(SCHEMA, "2");
+            settings.set_unprotected(SCHEMA, "3");
+            settings.set_protected(
+                "PGPCrypt.Preferences",
+                serde_json::to_string(&data.preferences)?,
+            );
             settings.set_protected("PGPCrypt.DefaultSigningKey", &data.default_signing_key);
             settings.set_protected("Notes", &data.notes);
             settings.set_unprotected(
@@ -459,6 +470,7 @@ mod tests {
             if entry.get(MARKER) == Some("settings") {
                 entry.set_unprotected(SCHEMA, "1");
                 entry.fields.remove("PGPCrypt.DefaultSigningKey");
+                entry.fields.remove("PGPCrypt.Preferences");
             }
         });
         let mut old_snapshot = Vec::new();
