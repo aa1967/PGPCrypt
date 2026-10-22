@@ -5,3 +5,5 @@
 *.pgpcrypt.age
 *.pgpcrypt.age.lock
 !tests/fixtures/legacy-alpha1.pgpvault
+*.kdbx
+*.kdbx.lock

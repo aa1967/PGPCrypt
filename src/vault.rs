@@ -19,9 +19,35 @@ const WORK_FACTOR: u8 = 18;
 
 #[derive(Default, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 #[serde(deny_unknown_fields)]
+pub struct RevocationTicket {
+    pub fingerprint: String,
+    pub armor: String,
+}
+
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
 pub struct VaultData {
     pub certificates: Vec<Vec<u8>>,
     pub notes: String,
+    #[serde(default)]
+    pub revocations: Vec<RevocationTicket>,
+    #[serde(default = "default_timeout")]
+    pub idle_timeout_seconds: u32,
+}
+
+fn default_timeout() -> u32 {
+    300
+}
+
+impl Default for VaultData {
+    fn default() -> Self {
+        Self {
+            certificates: Vec::new(),
+            notes: String::new(),
+            revocations: Vec::new(),
+            idle_timeout_seconds: default_timeout(),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -139,8 +165,12 @@ impl Vault {
         // No decoded data is exposed until the complete age stream authenticates.
         let stored: Stored = serde_json::from_slice(&plaintext).context("Invalid vault schema")?;
         ensure!(
-            stored.application == "PGPCrypt" && stored.schema == 1,
+            stored.application == "PGPCrypt" && matches!(stored.schema, 1 | 2),
             "Unsupported vault schema"
+        );
+        ensure!(
+            (60..=3600).contains(&stored.data.idle_timeout_seconds),
+            "Unsupported idle timeout"
         );
         Ok(Self {
             data: stored.data,
@@ -157,7 +187,7 @@ impl Vault {
     fn write(&self, create: bool) -> Result<()> {
         let mut plaintext = Zeroizing::new(serde_json::to_vec(&StoredRef {
             application: "PGPCrypt",
-            schema: 1,
+            schema: 2,
             data: &self.data,
         })?);
         let size = plaintext.len().div_ceil(PAD) * PAD;

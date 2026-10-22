@@ -1,52 +1,45 @@
-# Viewing and publishing the project on GitHub
+# Publishing Debian packages
 
-## What appears where
+The `.deb` is a GitHub **Release asset**, separate from the source checkout.
+Unversioned builds also provide an artifact in [Actions](https://github.com/aa1967/PGPCrypt/actions).
+Public downloads are in [Releases](https://github.com/aa1967/PGPCrypt/releases).
 
-- https://github.com/aa1967/PGPCrypt — source and README on the selected branch.
-- https://github.com/aa1967/PGPCrypt/actions — workflow logs and downloadable build artifacts.
-- https://github.com/aa1967/PGPCrypt/releases — releases and attached packages after publication.
+## Alpha3
 
-A desktop app runs on Debian, not inside GitHub Pages. The README screenshot
-provides a preview; download/install the package to use the interface.
+The release workflow runs after a version tag is pushed. It uses Debian 13's
+APT-provided compiler and Qt libraries, builds the package, runs checks on
+GitHub, and attaches `pgpcrypt_0.1.0~alpha3_amd64.deb` plus `SHA256SUMS` to a
+public prerelease. It needs no manually configured personal access token: only
+the release job receives the repository's automatic `contents: write` token.
+The SHA256 file detects corruption; it is not a publisher signature.
 
-Publishing a Codex cloud environment saves its development configuration and
-snapshot. It does **not** commit, push or publish this repository. Local edited
-and untracked files remain absent from public GitHub until pushed.
-
-During this work a read-only `git ls-remote --heads origin` check showed public
-`main` at initial commit `32f52e2710c642a22f30fc4398bc721b52050cfa` (README only).
-No code push or GitHub Release was performed by the assistant.
-
-## Publish source from the prepared checkout
-
-Review changes first, including the new files. From this checkout, using your
-normal GitHub Git authentication and configured Git author identity:
+From a checkout with the alpha3 changes committed:
 
 ```sh
-git status --short
-git switch -c pgpcrypt-alpha2
-git add README.md .gitignore Cargo.toml Cargo.lock rust-toolchain.toml \
-  src desktop scripts tests packaging docs .github
-git commit -m "Add Qt6 desktop, standard age vaults and Debian packaging"
-git push -u origin pgpcrypt-alpha2
+git push origin HEAD:refs/heads/pgpcrypt-alpha3
+git tag v0.1.0-alpha3
+git push origin refs/tags/v0.1.0-alpha3
 ```
 
-Then view https://github.com/aa1967/PGPCrypt/tree/pgpcrypt-alpha2.
-Open https://github.com/aa1967/PGPCrypt/compare/main...pgpcrypt-alpha2 to propose
-merging it into `main`. The default Code page changes only after selecting that
-branch or merging the change. Do not force-push to work around a rejected push.
-Never commit personal vault files, key exports or credentials. The included
-legacy migration fixture is explicitly disposable test data with a public test
-passphrase, not a user's vault.
+There are no local test prerequisites or Git hooks. Checks run in Actions after
+pushing. Watch the version-tag run; a failed build does not publish a package.
+Repository Actions must be enabled and organization policy must permit the
+release job's write permission. A pushed tag alone is not proof of a download.
+If publication fails after building, rerun the failed release job. Do not move
+or overwrite a published tag; issue a new version for changed source.
 
-## Build artifacts and binary releases
+The workflow currently validates the explicit alpha3 tag. For the next release,
+update that guard, package defaults, package paths, README and release notes in
+the same source commit before tagging. Build artifacts and releases contain
+compiled binaries, not a Rust installation requirement for end users.
 
-The checked-in Debian workflow builds/tests on Debian 13 with package-managed
-Rust. It can run on main, pull requests, or manually through Actions. A successful
-run provides the `pgpcrypt-debian13-amd64` artifact. Unzip it to obtain `.deb` and
-SHA256SUMS. The workflow does not create public releases automatically.
+GitHub prereleases appear on the Releases page; GitHub's `/releases/latest`
+endpoint excludes them. Do not use it for this alpha download link.
 
-To make a stable download location, a maintainer can create a prerelease in
-GitHub Releases and attach the tested `.deb` and SHA256SUMS. Choose an application
-license and complete dependency/release review before public binary distribution.
+## Source and merge
+
+Open https://github.com/aa1967/PGPCrypt/compare/main...pgpcrypt-alpha3 to merge
+the source change into main. The source branch and tag can build packages
+without waiting for the merge. No GitHub Pages deployment is needed.
+Never commit personal vaults, exported private keys, passphrases or credentials.
 An APT repository with signed metadata and automatic updates is a separate step.

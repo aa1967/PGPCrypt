@@ -3,6 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
 permissions:
   contents: read
@@ -18,18 +19,46 @@ jobs:
             libssl-dev clang libclang-dev qt6-base-dev qt6-wayland rustc cargo \
             rustfmt rust-clippy python3 binutils dpkg-dev desktop-file-utils libsodium-dev age gnupg
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Test and build
+      - name: Check release version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: test "$GITHUB_REF_NAME" = v0.1.0-alpha3
+      # These checks run on GitHub after pushing; there are no local Git hooks.
+      - name: Check source
         run: |
           ./scripts/dev.sh test --locked --all-features -j 2
           ./scripts/dev.sh fmt --all -- --check
           ./scripts/dev.sh clippy --locked --all-targets --all-features -- -D warnings
-          ./scripts/build-desktop.sh
+      - name: Build Debian package
+        run: ./scripts/build-deb.sh
+      - name: Check package and age interoperability
+        run: |
           python3 tests/age_interop.py
-          ./scripts/build-deb.sh
-          python3 scripts/check-deb.py dist/pgpcrypt_0.1.0~alpha2_amd64.deb
+          python3 scripts/check-deb.py dist/pgpcrypt_0.1.0~alpha3_amd64.deb
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: pgpcrypt-debian13-amd64
+          if-no-files-found: error
           path: |
             dist/*.deb
             dist/SHA256SUMS
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: pgpcrypt-debian13-amd64
+          path: dist
+      - name: Attach package to public prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease \
+            --title "PGPCrypt 0.1.0 alpha3 — Debian 13 amd64" \
+            --notes-file docs/releases/0.1.0-alpha3.md \
+            dist/pgpcrypt_0.1.0~alpha3_amd64.deb dist/SHA256SUMS

@@ -4,7 +4,7 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
 ./scripts/build-desktop.sh --release
 ./scripts/dev.sh build --release --locked --features legacy-migration --bin pgpcrypt-migrate -j 4
-package_version=${PGPCRYPT_PACKAGE_VERSION:-0.1.0~alpha2}
+package_version=${PGPCRYPT_PACKAGE_VERSION:-0.1.0~alpha3}
 dpkg --validate-version "$package_version"
 package_arch=$(dpkg --print-architecture)
 stage=$(mktemp -d "$repo_root/target/package.XXXXXX")
