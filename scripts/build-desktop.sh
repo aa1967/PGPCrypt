@@ -14,12 +14,12 @@ fi
 mkdir -p target/qt
 if [ -f "$qt_root/usr/lib/x86_64-linux-gnu/pkgconfig/Qt6Widgets.pc" ]; then
     export PKG_CONFIG_PATH="$qt_root/usr/lib/x86_64-linux-gnu/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-    qt_flags=$(pkg-config --define-variable="prefix=$qt_root/usr" --cflags --libs Qt6Widgets Qt6DBus)
+    qt_flags=$(pkg-config --define-variable="prefix=$qt_root/usr" --cflags --libs Qt6Widgets Qt6DBus Qt6Network)
     qt_rpath="-Wl,-rpath,$qt_root/usr/lib/x86_64-linux-gnu"
     qt_moc="$qt_root/usr/lib/qt6/libexec/moc"
     strength_flags="-I$qt_root/usr/include -L$qt_root/usr/lib/x86_64-linux-gnu -lzxcvbn"
 else
-    qt_flags=$(pkg-config --cflags --libs Qt6Widgets Qt6DBus)
+    qt_flags=$(pkg-config --cflags --libs Qt6Widgets Qt6DBus Qt6Network)
     qt_rpath=""
     qt_moc=$(pkg-config --variable=libexecdir Qt6Core)/moc
     strength_flags="-lzxcvbn"

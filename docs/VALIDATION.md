@@ -1,5 +1,49 @@
 # Validation history
 
+## Alpha7 evidence
+
+Functional source `1f9bee2` was pushed before execution. All 24 Rust tests passed
+(17 core, 1 GnuPG interop, 6 worker/lifecycle/adapter checks). New tests covered
+all-off preference defaults, invalid bounds/themes, saved preferences through
+both conversion directions, new signing/encryption subkeys under a protected
+primary, password-request codes, actual signing/decryption using the new subkeys,
+and qrexec operation/domain/privilege rejection without stderr leakage.
+
+Independent Debian age interoperability passed for age schemas 1/2/3/4;
+KeePassXC 2.7.10 protected-field read/edit/save and age conversion passed.
+The packaged age and KDBX Qt workflows passed: two pages only, no default focus
+lock, default signing key restoration, Dark/Solarized palette application,
+local Qubes broker rejection/approval and dom0-crypto denial, broker disable,
+on-demand protected-key passwords, crypto/retained notes and lock/restart.
+The Solarized Notepad layout was visually reviewed offscreen.
+
+The four packaged binaries passed ELF/dependency/no-RPATH checks. RPC handlers
+were present and no dom0 policy was installed. Permission guidance, ownership,
+formatting, Clippy and C++ warnings-as-errors passed. No system installation was
+performed. Native clipboard/compositor behavior, real Qubes policy/inter-qube
+transport/host events, host-hook deployment and an independent security audit
+remain untested in this cloud environment. Local broker tests are not a claim
+of real-Qubes certification.
+
+## Alpha6 evidence
+
+Functional source at `ee740b8` was pushed before tests. All 22 Rust tests passed
+(17 core, 1 GnuPG interoperability, 4 worker/lifecycle), as did independent age
+and Debian KeePassXC 2.7.10 interoperability. New checks covered passwordless
+and one-character key passwords, adding/removing key protection, wrong-password
+rejection, explicit unprotected export, default signing key validation and
+persistence through reopening and conversions in both directions.
+
+The `.deb` passed packaged Qt workflows for age with a one-character key password
+and KDBX with no key password: recipients/signing controls were on Notepad,
+saved defaults were restored, recipient checks survived refresh, and crypto,
+notes and lock/restart passed. ELF/runtime/path/permission checks passed without
+installing system files. Formatting, Clippy and C++ warnings-as-errors passed.
+Follow-up source `c769c28` passed previous KDBX settings-schema compatibility
+and independent age schema-1/2/3 reopening checks. Its KDBX Notepad workflow
+passed again with a screenshot: all recipient/signing/default/password/action
+controls fit on the Notepad page. These follow-up checks also ran after pushing.
+
 ## Alpha5 evidence
 
 Source was pushed before tests. Debian backports Rust/Cargo 1.96.1 built the

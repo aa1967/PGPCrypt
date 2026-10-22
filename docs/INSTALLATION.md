@@ -5,7 +5,7 @@
 ```sh
 pgpcrypt_install_dir=$(mktemp -d /tmp/pgpcrypt-install.XXXXXX)
 chmod 755 "$pgpcrypt_install_dir"
-install -m 644 ~/Downloads/pgpcrypt_0.1.0.alpha5_amd64.deb "$pgpcrypt_install_dir/pgpcrypt.deb"
+install -m 644 ~/Downloads/pgpcrypt_0.1.0.alpha7_amd64.deb "$pgpcrypt_install_dir/pgpcrypt.deb"
 sudo apt update
 sudo apt install "$pgpcrypt_install_dir/pgpcrypt.deb"
 pgpcrypt
@@ -24,7 +24,7 @@ A public APT repository is not required for local `.deb` installation.
 ```sh
 sudo apt update
 sudo apt install -y git ca-certificates
-git clone --branch v0.1.0-alpha5 https://github.com/aa1967/PGPCrypt.git
+git clone --branch v0.1.0-alpha7 https://github.com/aa1967/PGPCrypt.git
 cd PGPCrypt
 ./scripts/install-debian.sh --build
 pgpcrypt
@@ -36,7 +36,7 @@ To build without installing:
 
 ```sh
 ./scripts/build-deb.sh
-python3 scripts/check-deb.py dist/pgpcrypt_0.1.0.alpha5_amd64.deb
+python3 scripts/check-deb.py dist/pgpcrypt_0.1.0.alpha7_amd64.deb
 ```
 
 ## Reproducibility and validation limits

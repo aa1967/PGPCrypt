@@ -1,5 +1,6 @@
-//! Preparation for a future qrexec broker, deliberately separate from the
-//! desktop worker protocol. No RPC service or policy is installed by PGPCrypt.
+//! Strict remote request decoder, separate from the desktop worker protocol.
+//! The optional qrexec adapter uses this allowlist. The GUI requires approval;
+//! no dom0 policy is installed by the guest package.
 use anyhow::{Result, ensure};
 use serde::Deserialize;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -28,7 +29,7 @@ impl Caller {
     }
 }
 
-/// A request is data, not authorization. A future broker must obtain fresh
+/// A request is data, not authorization. The broker must obtain fresh
 /// local approval displaying the authenticated caller, operation and key.
 /// Passwords, vault paths, settings, imports, exports and enumeration have no
 /// representation in this protocol. No fields are forwarded to a shell.

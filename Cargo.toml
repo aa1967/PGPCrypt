@@ -15,6 +15,10 @@ name = "pgpcrypt-worker"
 path = "src/bin/pgpcrypt-worker.rs"
 
 [[bin]]
+name = "pgpcrypt-qrexec"
+path = "src/bin/pgpcrypt-qrexec.rs"
+
+[[bin]]
 name = "pgpcrypt-migrate"
 path = "src/bin/pgpcrypt-migrate.rs"
 required-features = ["legacy-migration"]

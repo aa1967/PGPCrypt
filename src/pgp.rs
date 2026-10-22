@@ -71,10 +71,6 @@ pub struct KeyOptions {
 
 pub fn generate_with_options(options: &KeyOptions, password: &str) -> Result<(Cert, String)> {
     use openpgp::cert::{CertBuilder, CipherSuite};
-    ensure!(
-        password.chars().count() >= 16,
-        "Private-key passphrase must have at least 16 characters"
-    );
     let name = options.name.trim();
     let email = options.email.trim();
     let comment = options.comment.trim();
@@ -194,7 +190,7 @@ pub fn generate_with_options(options: &KeyOptions, password: &str) -> Result<(Ce
         .set_primary_key_flags(primary)
         .set_validity_period(validity)
         .set_features(openpgp::types::Features::empty().set_seipdv1())?
-        .set_password(Some(password.into()))
+        .set_password((!password.is_empty()).then(|| password.into()))
         .add_userid(userid);
     if !single {
         if options.signing || options.authentication {
@@ -245,6 +241,13 @@ pub fn protected_private_armor(cert: &Cert) -> Result<Zeroizing<String>> {
             .all(|ka| ka.key().secret().is_encrypted()),
         "Private export requires all secret packets to be passphrase protected"
     );
+    private_armor(cert)
+}
+
+/// Used only for explicit private export; an empty key password means that
+/// copied secret packets have no protection beyond their destination storage.
+pub fn private_armor(cert: &Cert) -> Result<Zeroizing<String>> {
+    ensure!(cert.is_tsk(), "Selected key has no private material");
     let mut bytes = Zeroizing::new(Vec::new());
     cert.as_tsk().armored().serialize(&mut *bytes)?;
     Ok(Zeroizing::new(std::str::from_utf8(&bytes)?.to_owned()))
@@ -252,10 +255,6 @@ pub fn protected_private_armor(cert: &Cert) -> Result<Zeroizing<String>> {
 
 pub fn protect_private_key(cert: &Cert, old_password: &str, new_password: &str) -> Result<Cert> {
     ensure!(cert.is_tsk(), "Selected key has no private material");
-    ensure!(
-        new_password.chars().count() >= 16,
-        "Use at least 16 characters for the new private-key passphrase"
-    );
     let mut packets = Vec::new();
     for ka in cert.keys().secret() {
         let primary = ka.key().fingerprint() == cert.fingerprint();
@@ -265,7 +264,9 @@ pub fn protect_private_key(cert: &Cert, old_password: &str, new_password: &str) 
                 .decrypt_secret(&old_password.into())
                 .context("Could not unlock a secret key packet; check the current passphrase")?;
         }
-        key = key.encrypt_secret(&new_password.into())?;
+        if !new_password.is_empty() {
+            key = key.encrypt_secret(&new_password.into())?;
+        }
         packets.push(if primary {
             openpgp::Packet::from(key.role_into_primary())
         } else {
@@ -316,6 +317,103 @@ pub fn encrypt(text: &str, certs: &[Cert]) -> Result<String> {
     Ok(String::from_utf8(output)?)
 }
 
+#[derive(Debug)]
+pub struct PasswordRequired;
+impl std::fmt::Display for PasswordRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Private-key password/passphrase required or incorrect")
+    }
+}
+impl std::error::Error for PasswordRequired {}
+
+#[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
+pub struct SubkeyOptions {
+    pub algorithm: String,
+    pub purpose: String,
+    pub expires_at: Option<u64>,
+}
+pub fn add_subkey(
+    cert: &Cert,
+    options: &SubkeyOptions,
+    primary_password: &str,
+    subkey_password: &str,
+) -> Result<Cert> {
+    use openpgp::cert::{CipherSuite, KeyBuilder};
+    let policy = StandardPolicy::new();
+    validate_for_new_operation(cert, &policy)?;
+    let valid = cert.with_policy(&policy, None)?;
+    ensure!(
+        valid.primary_key().for_certification(),
+        "Primary key must support certification"
+    );
+    let mut primary = cert
+        .primary_key()
+        .key()
+        .clone()
+        .parts_into_secret()
+        .context("Primary private key required to certify a new subkey")?;
+    if primary.secret().is_encrypted() {
+        primary = primary
+            .decrypt_secret(&primary_password.into())
+            .map_err(|_| PasswordRequired)?;
+    }
+    let suite = match options.algorithm.as_str() {
+        "cv25519" => CipherSuite::Cv25519,
+        "rsa2048" => CipherSuite::RSA2k,
+        "rsa3072" => CipherSuite::RSA3k,
+        "rsa4096" => CipherSuite::RSA4k,
+        "p256" => CipherSuite::P256,
+        "p384" => CipherSuite::P384,
+        "p521" => CipherSuite::P521,
+        _ => bail!("Unsupported subkey algorithm"),
+    };
+    let flags = match options.purpose.as_str() {
+        "sign" => KeyFlags::empty().set_signing(),
+        "encrypt" => KeyFlags::empty()
+            .set_transport_encryption()
+            .set_storage_encryption(),
+        "authenticate" => KeyFlags::empty().set_authentication(),
+        _ => bail!("Unsupported subkey purpose"),
+    };
+    let expiry = options
+        .expires_at
+        .map(|seconds| -> Result<SystemTime> {
+            let time = UNIX_EPOCH
+                .checked_add(Duration::from_secs(seconds))
+                .context("Invalid subkey expiry")?;
+            ensure!(
+                time.duration_since(SystemTime::now())?.as_secs() >= 60,
+                "Choose an expiry at least one minute in the future"
+            );
+            if let Some(primary_expiry) = valid.primary_key().key_expiration_time() {
+                ensure!(
+                    time <= primary_expiry,
+                    "Subkey expiry must not exceed primary key expiry"
+                );
+            }
+            Ok(time)
+        })
+        .transpose()?;
+    ensure!(
+        expiry.is_some() || valid.primary_key().key_expiration_time().is_none(),
+        "Choose a subkey expiry within the primary key lifetime"
+    );
+    let result = KeyBuilder::new(flags)
+        .set_creation_time(SystemTime::now())
+        .set_cipher_suite(suite)
+        .set_password((!subkey_password.is_empty()).then(|| subkey_password.into()))
+        .subkey(valid)?
+        .set_primary_key_signer(primary.into_keypair()?)
+        .set_key_expiration_time(expiry)?
+        .attach_cert()?;
+    ensure!(
+        result.fingerprint() == cert.fingerprint(),
+        "Primary fingerprint changed unexpectedly"
+    );
+    Ok(result)
+}
+
 pub fn sign(text: &str, cert: &Cert, password: &str) -> Result<String> {
     bounded(text)?;
     let policy = StandardPolicy::new();
@@ -334,7 +432,7 @@ pub fn sign(text: &str, cert: &Cert, password: &str) -> Result<String> {
     if key.secret().is_encrypted() {
         key = key
             .decrypt_secret(&password.into())
-            .context("Could not unlock signing key")?;
+            .map_err(|_| PasswordRequired)?;
     }
     let mut output = Vec::new();
     let message = Armorer::new(Message::new(&mut output)).build()?;
@@ -413,6 +511,7 @@ impl DecryptionHelper for Helper {
         decrypt: &mut dyn FnMut(Option<SymmetricAlgorithm>, &SessionKey) -> bool,
     ) -> Result<Option<Cert>> {
         let policy = StandardPolicy::new();
+        let mut password_required = false;
         for cert in &self.certs {
             for ka in cert
                 .keys()
@@ -425,10 +524,19 @@ impl DecryptionHelper for Helper {
                 })
             {
                 let mut key = ka.key().clone();
+                if !pkesks.iter().any(|p| {
+                    p.recipient()
+                        .is_none_or(|recipient| recipient.aliases(key.key_handle()))
+                }) {
+                    continue;
+                }
                 if key.secret().is_encrypted() {
                     key = match key.decrypt_secret(&self.password.as_str().into()) {
                         Ok(key) => key,
-                        Err(_) => continue,
+                        Err(_) => {
+                            password_required = true;
+                            continue;
+                        }
                     };
                 }
                 let mut pair = key.into_keypair()?;
@@ -440,6 +548,9 @@ impl DecryptionHelper for Helper {
                     }
                 }
             }
+        }
+        if password_required {
+            return Err(PasswordRequired.into());
         }
         bail!(
             "No usable decryption key; check key passphrase, expiration, and imported secret keys"
@@ -578,7 +689,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_weak_algorithms_past_expiry_and_unprotected_generation() {
+    fn rejects_weak_algorithms_and_past_expiry() {
         let mut settings = options("rsa1024", "single");
         assert!(generate_with_options(&settings, "disposable key passphrase").is_err());
         settings.algorithm = "dsa_elgamal".into();
@@ -586,8 +697,47 @@ mod tests {
         settings.algorithm = "rsa2048".into();
         settings.expires_at = Some(1);
         assert!(generate_with_options(&settings, "disposable key passphrase").is_err());
-        settings.expires_at = None;
-        assert!(generate_with_options(&settings, "").is_err());
+    }
+
+    #[test]
+    fn optional_and_short_key_passwords_support_crypto_and_removal() -> Result<()> {
+        for password in ["", "x"] {
+            let (cert, _) = generate_with_options(&options("cv25519", "subkeys"), password)?;
+            assert!(
+                cert.keys()
+                    .secret()
+                    .all(|ka| ka.key().secret().is_encrypted() != password.is_empty())
+            );
+            let encrypted = encrypt("optional password fixture", std::slice::from_ref(&cert))?;
+            assert_eq!(
+                decrypt(&encrypted, vec![cert.clone()], password)?
+                    .text
+                    .as_str(),
+                "optional password fixture"
+            );
+            let signed = sign("signature fixture", &cert, password)?;
+            assert_eq!(
+                verify(&signed, vec![cert.clone()])?.text.as_str(),
+                "signature fixture"
+            );
+            let short = protect_private_key(&cert, password, "a")?;
+            assert!(sign("fixture", &short, "wrong").is_err());
+            let plain = protect_private_key(&short, "a", "")?;
+            assert!(
+                plain
+                    .keys()
+                    .secret()
+                    .all(|ka| !ka.key().secret().is_encrypted())
+            );
+            sign("fixture", &plain, "")?;
+            assert_eq!(
+                decrypt(&encrypted, vec![plain.clone()], "")?.text.as_str(),
+                "optional password fixture"
+            );
+            assert!(private_armor(&plain)?.contains("BEGIN PGP PRIVATE KEY BLOCK"));
+            assert!(protected_private_armor(&plain).is_err());
+        }
+        Ok(())
     }
 
     #[test]

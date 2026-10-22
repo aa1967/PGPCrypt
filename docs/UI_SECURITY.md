@@ -10,8 +10,9 @@ The supervisor has no widgets, passphrases, vault paths, or contents. It starts
 a session UI, which starts a Rust worker through private stdin/stdout pipes.
 Passwords are never command-line arguments. The worker owns the unlocked vault
 and runs crypto. It returns selected metadata, public exports, notes, and
-operation results. Private-key export is an explicit user action and requires every secret packet
-to be passphrase encrypted. Revocation exports require an explicit confirmation. Pasted private-key
+operation results. Private-key export is an explicit confirmed action. The UI
+identifies private packets without password protection before displaying them;
+private-key passwords are optional. Revocation exports require confirmation. Pasted private-key
 imports necessarily pass through GUI text and IPC buffers; this exception must
 not be mistaken for worker-only private-key custody.
 
@@ -36,15 +37,17 @@ It is not a sandbox against the UI while unlocked.
   and last-directory writes; this affects this process only.
 - New vaults default to `~/vault.pgpcrypt.age`. Relative paths and `~/` expand
   under the current user's home, independently of the launch directory.
-- Creation always requires matching password/passphrase confirmation. A
+- Vault creation always requires matching password/passphrase confirmation. A
   debounced local libzxcvbn estimate recognizes common passwords and patterns;
   it makes no strength guarantee, and no password is sent to a service. New
   creation fields accept up to 256 UTF-16 code units; opening preserves the
   previous 32767-code-unit limit for existing vaults.
-- Idle, focus loss, and event-loop gaps request lock. Best-effort logind lock/
+- Opt-in inactivity/focus/session rules request lock. All are off until enabled
+  in Settings. Best-effort logind lock/
   suspend and freedesktop screensaver signal subscriptions are wired.
 - UI and worker disable core dumps and Linux process dumpability.
-- Lock deliberately discards unsaved text and notes.
+- Lock deliberately discards unsaved text. The notes page is removed; old saved
+  notes remain in the encrypted container.
 
 Qt strings, input methods, accessibility, rendering caches, clipboard backends,
 and QProcess serialization can still allocate copies. Clearing a widget is not
@@ -67,3 +70,25 @@ Source inspection of egui/epaint 0.37.0 identified undo history containing norma
 String copies and cached text layouts. These are retention concerns for this
 threat model, not a list of demonstrated CVEs. The same scrutiny applies to Qt.
 The old harness is removed; the same memory-lifecycle scrutiny still applies to Qt.
+
+## Notepad controls (alpha6)
+
+Recipients, signing-key selection, optional key-password entry and all text
+operations are on Notepad. The encrypted vault stores the default signing
+fingerprint; it is restored on unlock and preserved through format conversion.
+Explicit recipient selections and one-operation signing choices stay in process
+memory. Private-key generation/password changes accept empty or short values,
+with matching confirmation. Vault password rules are separate.
+
+## Alpha7 interaction and Qubes RPC
+
+Settings holds timeouts, clipboard clearing, themes and conversion. Passwords
+are prompted on demand and are never cached between operations. Local subkey
+creation uses the primary private key to certify the binding.
+
+Opt-in Qubes RPC exposes only versioned signing/decryption and a dom0-only
+lock request. Per-request GUI approval precedes crypto. The helper constrains
+input size, EOF deadline, service/operation binding and allowed JSON fields.
+Same-UID Unix socket peers and private runtime directories are checked, but
+the whole guest/user account remains trusted. See QUBES.md for dom0 policy,
+limits, cancellation behavior and remaining real-Qubes validation.

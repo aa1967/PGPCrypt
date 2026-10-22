@@ -248,13 +248,25 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
     let mut fingerprints = HashSet::new();
     for entry in group.entries() {
         ensure!(
-            entry.get(SCHEMA) == Some("1"),
+            entry.get(SCHEMA) == Some("1")
+                || (entry.get(MARKER) == Some("settings")
+                    && matches!(entry.get(SCHEMA), Some("2" | "3"))),
             "Unsupported PGPCrypt KDBX entry schema"
         );
         match entry.get(MARKER) {
             Some("settings") => {
                 ensure!(!settings, "Duplicate PGPCrypt settings");
                 settings = true;
+                data.default_signing_key = entry
+                    .get("PGPCrypt.DefaultSigningKey")
+                    .unwrap_or_default()
+                    .to_owned();
+                data.preferences = entry
+                    .get("PGPCrypt.Preferences")
+                    .map(serde_json::from_str)
+                    .transpose()?
+                    .unwrap_or_default();
+                data.preferences.validate()?;
                 data.notes = entry.get("Notes").unwrap_or_default().to_owned();
                 data.idle_timeout_seconds = entry
                     .get("PGPCrypt.IdleTimeoutSeconds")
@@ -387,7 +399,12 @@ pub fn write(
             };
             settings.set_unprotected("Title", "Vault notes and settings");
             settings.set_unprotected(MARKER, "settings");
-            settings.set_unprotected(SCHEMA, "1");
+            settings.set_unprotected(SCHEMA, "3");
+            settings.set_protected(
+                "PGPCrypt.Preferences",
+                serde_json::to_string(&data.preferences)?,
+            );
+            settings.set_protected("PGPCrypt.DefaultSigningKey", &data.default_signing_key);
             settings.set_protected("Notes", &data.notes);
             settings.set_unprotected(
                 "PGPCrypt.IdleTimeoutSeconds",
@@ -447,6 +464,18 @@ mod tests {
             .unwrap();
         assert!(entry.fields["OpenPGP.PrivateKey"].is_protected());
         assert!(entry.fields["OpenPGP.Revocation"].is_protected());
+        // Earlier PGPCrypt KDBX settings lack the default-key field.
+        let mut old_db = db.clone();
+        old_db.foreach_entry_mut(|mut entry| {
+            if entry.get(MARKER) == Some("settings") {
+                entry.set_unprotected(SCHEMA, "1");
+                entry.fields.remove("PGPCrypt.DefaultSigningKey");
+                entry.fields.remove("PGPCrypt.Preferences");
+            }
+        });
+        let mut old_snapshot = Vec::new();
+        old_db.save(&mut old_snapshot, DatabaseKey::new().with_password(PASS))?;
+        assert!(open(&old_snapshot, PASS)?.0.default_signing_key.is_empty());
         let mut root = db.root_mut();
         let mut unrelated = root.add_entry();
         unrelated.set_unprotected("Title", "Unrelated entry");
