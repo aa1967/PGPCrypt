@@ -1,4 +1,4 @@
-# KDBX support (alpha5)
+# KDBX support
 
 Create vault offers age v1 (default) or KDBX 4.1. Opening detects the format from
 its contents, independently of the filename. OpenPGP operations use the same
@@ -46,7 +46,8 @@ normal entry with these custom attributes:
 | OpenPGP.PrivateKey | Armored private certificate, if present |
 | OpenPGP.Revocation | Armored emergency revocation certificate, if present |
 
-The three armored fields use KeePass protected values. Reveal and copy the
+Each key entry includes short recovery instructions in its Notes. The three
+armored fields use KeePass protected values. Reveal and copy the
 needed armor into a trusted OpenPGP tool. Private packets retain their
 independent password if one was chosen; it is never stored in a KeePass password field.
 Keys created or imported without a key password have unprotected secret
@@ -64,7 +65,15 @@ duplicate settings, duplicate fingerprints and unknown entries inside this
 group are rejected. Put unrelated KeePass entries in another group or the root.
 Supported unrelated entries, history and custom string fields are retained on
 KDBX saves. Keep only one application open on a database at a time: PGPCrypt's
-advisory lock is not KeePassXC's lock protocol. Unsupported extensions fail
+advisory lock is not KeePassXC's lock protocol. Alpha8 compares the encrypted
+file against the opened/saved snapshot before saving and immediately before
+replacement; detected outside changes are refused without overwriting them. Lock
+and reopen to load KeePassXC changes. A small check/rename race remains with
+non-cooperating editors, so simultaneous editing is unsupported. Atomic ciphertext
+replacement, file fsync and directory fsync protect normal saves; if directory
+sync fails after replacement, the session closes and must be reopened. Neither
+this nor KDBX authentication substitutes for backups or detects rollback to an
+older valid copy. Unsupported extensions fail
 closed rather than being intentionally discarded.
 
 ## Convert without overwriting

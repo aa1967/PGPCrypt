@@ -1,6 +1,7 @@
 # Security boundaries
 
-The app is an alpha, not an independently audited product. Its **encryption
+The app is an alpha, not an independently audited product. See the scoped
+[alpha8 security review](SECURITY_REVIEW_ALPHA8.md) for findings and advisory limits. Its **encryption
 container is standard age v1**, not a new crypto format. See
 [ADR 001](ADR-001-vault-format.md) and [the schema](VAULT_FORMAT.md).
 
@@ -16,6 +17,7 @@ binary to read alpha1 files.
 All public/private key bytes, identities, emails, fingerprints, notes and schema
 metadata are inside encryption. There is no default GnuPG home/agent access,
 background networking, telemetry, plaintext autosave or external keyring index.
+Explicitly saving a decrypted Notepad result writes plaintext to the chosen file.
 The complete vault stream authenticates before parsing; decrypted text is also
 buffered until its OpenPGP reader finishes successfully. Unknown/invalid
 signatures fail verification. Signature validity does not establish identity.
@@ -33,6 +35,12 @@ recipient features. GnuPG-compatible generated certificates advertise SEIPDv1;
 SEIPDv2 AEAD is supported where advertised. StandardPolicy rejects weak document
 signatures and unsuitable keys; modern RFC 9580 paths are tested separately.
 Vault age encryption is independent of this OpenPGP interoperability choice.
+Imported secret-key S2Ks are bounded before derivation (Argon2 at most 256 MiB,
+10 passes, 4 lanes; at most 16 encrypted packet unlocks per operation and a
+combined Argon2 work budget). Unsupported S2Ks fail explicitly. This caps
+password-derivation work, not every possible parser/CPU cost. Validated self-bound
+identities are displayed; ownership still needs a verified full fingerprint.
+Text signing uses the standard cleartext framework; signing does not conceal text.
 
 The Qt6 session UI and worker disable core dumps/process dumpability. The worker
 owns stored/generated private keys. Pasted private-key imports necessarily pass

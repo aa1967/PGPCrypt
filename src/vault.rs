@@ -3,6 +3,7 @@ use age::secrecy::SecretString;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
+    cell::RefCell,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     os::unix::fs::OpenOptionsExt,
@@ -62,7 +63,16 @@ impl Preferences {
             "Clipboard interval must be disabled or 5 seconds to 30 minutes"
         );
         ensure!(
-            matches!(self.theme.as_str(), "light" | "dark" | "solarized"),
+            matches!(
+                self.theme.as_str(),
+                "light"
+                    | "warm-light"
+                    | "dark"
+                    | "nord"
+                    | "solarized-light"
+                    | "solarized-dark"
+                    | "solarized"
+            ),
             "Unsupported theme"
         );
         Ok(())
@@ -147,6 +157,30 @@ pub struct Vault {
     _lock: File,
     format: VaultFormat,
     kdbx: Option<Box<keepass::Database>>,
+    // Ciphertext is not secret. Keep the exact bytes last opened or saved so a
+    // non-cooperating editor (for example KeePassXC) cannot silently lose a save.
+    encrypted_snapshot: RefCell<Vec<u8>>,
+}
+
+/// The atomic replacement succeeded, but its directory sync failed. Callers
+/// must reopen the committed file before allowing more mutations.
+#[derive(Debug)]
+pub struct SaveCommitted(std::io::Error);
+
+impl std::fmt::Display for SaveCommitted {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            output,
+            "Vault saved, but storage durability could not be confirmed. Reopen the vault and keep a backup: {}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for SaveCommitted {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.0)
+    }
 }
 
 fn file_error(error: std::io::Error, operation: &str, path: &Path) -> anyhow::Error {
@@ -235,6 +269,7 @@ impl Vault {
             _lock: lock,
             format,
             kdbx: None,
+            encrypted_snapshot: RefCell::new(Vec::new()),
         };
         vault.write(true)?;
         Ok(vault)
@@ -274,6 +309,7 @@ impl Vault {
                 _lock: lock,
                 format: VaultFormat::Kdbx,
                 kdbx: Some(Box::new(db)),
+                encrypted_snapshot: RefCell::new(bytes),
             });
         }
         let decryptor = age::Decryptor::new_buffered(bytes.as_slice())
@@ -314,6 +350,7 @@ impl Vault {
             _lock: lock,
             format: VaultFormat::Age,
             kdbx: None,
+            encrypted_snapshot: RefCell::new(bytes),
         })
     }
 
@@ -343,7 +380,27 @@ impl Vault {
         self.write(false)
     }
 
+    fn check_unchanged(&self) -> Result<()> {
+        let changed = "Vault changed outside PGPCrypt. Lock and reopen it before saving; external changes were not overwritten";
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(&self.path)
+            .context(changed)?;
+        ensure!(file.metadata()?.is_file(), "{changed}");
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take((MAX_ENCRYPTED + 1) as u64)
+            .read_to_end(&mut bytes)
+            .context(changed)?;
+        ensure!(bytes == *self.encrypted_snapshot.borrow(), "{changed}");
+        Ok(())
+    }
+
     fn write(&self, create: bool) -> Result<()> {
+        if !create {
+            self.check_unchanged()?;
+        }
         let mut plaintext = Zeroizing::new(serde_json::to_vec(&StoredRef {
             application: "PGPCrypt",
             schema: 4,
@@ -383,17 +440,24 @@ impl Vault {
             }
         }
         temp.as_file().sync_all()?;
+        let mut encrypted = Vec::new();
+        temp.reopen()?
+            .take((MAX_ENCRYPTED + 1) as u64)
+            .read_to_end(&mut encrypted)?;
+        ensure!(encrypted.len() <= MAX_ENCRYPTED, "Oversized vault");
         if create {
             temp.persist_noclobber(&self.path)
                 .map_err(|e| file_error(e.error, "create the vault file", &self.path))?;
         } else {
-            if fs::symlink_metadata(&self.path)?.file_type().is_symlink() {
-                bail!("Refusing symlink destination");
-            }
+            // Encryption/KDF work can take seconds; recheck immediately before
+            // replacement. An editor that ignores our lock still must not run
+            // concurrently: POSIX rename has no compare-and-swap primitive.
+            self.check_unchanged()?;
             temp.persist(&self.path)
                 .map_err(|e| file_error(e.error, "replace the encrypted vault file", &self.path))?;
         }
-        directory.sync_all()?;
+        *self.encrypted_snapshot.borrow_mut() = encrypted;
+        directory.sync_all().map_err(SaveCommitted)?;
         Ok(())
     }
 
@@ -463,6 +527,38 @@ mod tests {
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&path, &link)?;
         assert!(Vault::open(&link, PASS).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn external_edits_are_not_overwritten() -> Result<()> {
+        for format in [VaultFormat::Age, VaultFormat::Kdbx] {
+            let dir = tempfile::tempdir()?;
+            let path = dir.path().join("vault");
+            let external = dir.path().join("external");
+            let mut vault = Vault::create_format(&path, PASS, format)?;
+            let mut external_data = VaultData::default();
+            external_data.notes = "saved by another application".into();
+            drop(Vault::create_data(&external, PASS, format, external_data)?);
+            let external_bytes = fs::read(&external)?;
+            fs::copy(&external, &path)?;
+            vault.data.notes = "stale in-memory update".into();
+            let error = vault.save().unwrap_err();
+            assert!(error.to_string().contains("changed outside PGPCrypt"));
+            assert_eq!(fs::read(&path)?, external_bytes);
+            fs::remove_file(&path)?;
+            assert!(vault.save().is_err(), "deleted vault must not be recreated");
+            std::os::unix::fs::symlink(&external, &path)?;
+            assert!(vault.save().is_err(), "symlink must not be replaced");
+            assert_eq!(fs::read(&external)?, external_bytes);
+            fs::remove_file(&path)?;
+            fs::copy(&external, &path)?;
+            drop(vault);
+            assert_eq!(
+                Vault::open(&path, PASS)?.data.notes,
+                "saved by another application"
+            );
+        }
         Ok(())
     }
 

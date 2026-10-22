@@ -2,6 +2,12 @@
 set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 tools_root=$(dirname -- "$repo_root")/.pgpcrypt-tools
+if [ -d "$tools_root/debian-openssl/usr/lib/x86_64-linux-gnu" ]; then
+    # Rootless cloud builds use the current signed Debian security package.
+    export OPENSSL_LIB_DIR="$tools_root/debian-openssl/usr/lib/x86_64-linux-gnu"
+    export OPENSSL_INCLUDE_DIR="$tools_root/debian-openssl/usr/include"
+    export LD_LIBRARY_PATH="$OPENSSL_LIB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 if [ -x /usr/bin/cargo ] && [ -x /usr/bin/rustc ]; then
     # A normal Debian source build uses its package-managed compiler.
     export PATH="/usr/bin:$PATH"

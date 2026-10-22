@@ -75,10 +75,10 @@ fn encrypt_decrypt_and_sign_verify_with_gnupg() -> Result<()> {
     assert_eq!(decrypted.text.as_str(), text);
 
     let signed = pgp::sign(text, &cert, "")?;
-    assert_eq!(
-        home.command(&["--decrypt"], signed.as_bytes())?,
-        text.as_bytes()
-    );
+    assert!(signed.starts_with("-----BEGIN PGP SIGNED MESSAGE-----"));
+    // Verify independently. Cleartext display is not an exact-byte decode:
+    // GnuPG's --decrypt renderer includes the final armor separator newline.
+    home.command(&["--verify"], signed.as_bytes())?;
     let signed = home.command(
         &["--armor", "--local-user", &fingerprint, "--sign"],
         text.as_bytes(),

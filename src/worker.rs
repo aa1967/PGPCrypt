@@ -145,10 +145,15 @@ impl Session {
                         Err(_) => "Unsupported / invalid",
                     };
                     json!({"fingerprint":cert.fingerprint().to_hex(),
-                        "identities":cert.userids().map(|u|String::from_utf8_lossy(u.userid().value()).into_owned()).collect::<Vec<_>>(),
+                        // Only show identities with a current valid self-binding.
+                        // This still does not establish the owner's real identity.
+                        "identities":cert.with_policy(&policy,None).ok().map(|valid|valid.userids().revoked(false).map(|u|String::from_utf8_lossy(u.userid().value()).into_owned()).collect::<Vec<_>>()).unwrap_or_default(),
                         "has_secret":cert.is_tsk(), "status":status,
                         "has_revocation":vault.data.revocations.iter().any(|r|r.fingerprint==cert.fingerprint().to_hex()),
                         "secret_protected":cert.is_tsk() && cert.keys().secret().all(|ka|ka.key().secret().is_encrypted()),
+                        "secret_any_protected":cert.keys().secret().any(|ka|ka.key().secret().is_encrypted()),
+                        "primary_secret_protected":cert.primary_key().key().optional_secret().is_some_and(|s|s.is_encrypted()),
+                        "signing_password_required":cert.keys().secret().with_policy(&policy,None).supported().alive().revoked(false).for_signing().all(|ka|ka.key().secret().is_encrypted()),
                         "algorithm":cert.primary_key().key().pk_algo().to_string(),
                         "expires_at":cert.with_policy(&policy,None).ok().and_then(|c| c.primary_key().key_expiration_time()).and_then(|t|t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d|d.as_secs()),
                         "capabilities":cert.keys().with_policy(&policy,None).supported().filter_map(|ka|ka.key_flags()).map(|f|format!("{f:?}")).collect::<Vec<_>>(),
@@ -441,7 +446,24 @@ pub fn run(mut input: impl BufRead, mut output: impl Write) -> Result<()> {
         let result = match session.handle(&request) {
             Ok(data) => json!({"id":request.id,"ok":true,"data":data}),
             Err(error) => {
-                json!({"id":request.id,"ok":false,"error":format!("{error:#}"),"code":if error.chain().any(|cause|cause.is::<pgp::PasswordRequired>()) {"password_required"} else {"operation_failed"}})
+                let code = if error
+                    .chain()
+                    .any(|cause| cause.is::<crate::vault::SaveCommitted>())
+                {
+                    // A rename succeeded, but directory durability could not be
+                    // confirmed. Discard any rollback state: only reopening the
+                    // file can establish what is on disk.
+                    session.vault = None;
+                    "vault_reopen_required"
+                } else if error
+                    .chain()
+                    .any(|cause| cause.is::<pgp::PasswordRequired>())
+                {
+                    "password_required"
+                } else {
+                    "operation_failed"
+                };
+                json!({"id":request.id,"ok":false,"error":format!("{error:#}"),"code":code})
             }
         };
         let bytes = Zeroizing::new(serde_json::to_vec(&result)?);
