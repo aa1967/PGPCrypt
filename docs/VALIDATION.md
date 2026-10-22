@@ -1,5 +1,14 @@
 # Validation history
 
+## Alpha5 workflow
+
+Source is pushed before tests. Debian backports Rust/Cargo 1.96.1 compiles the
+KDBX integration and Qt UI; formatting and Clippy checks run without executing
+tests before pushing. Post-push validation adds KDBX authentication/resource
+guards, lossless PGPCrypt-data conversion, restricted remote request decoding,
+and independent Debian KeePassXC interoperability. Actual results are recorded
+after those commands finish. Real Qubes and KeePass 2 remain untested.
+
 ## Alpha4 workflow
 
 No tests run before the source push, following the user's workflow preference.

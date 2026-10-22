@@ -93,7 +93,7 @@ pub fn read(path: &Path, password: &str) -> Result<VaultData> {
     };
     ensure!(result == 0, "Wrong legacy passphrase or damaged vault");
     ensure!(
-        length as usize == plaintext.len() && plaintext.len() % 4096 == 0,
+        length as usize == plaintext.len() && plaintext.len().is_multiple_of(4096),
         "Invalid legacy payload"
     );
     let length = u32::from_le_bytes(plaintext[..4].try_into()?) as usize;

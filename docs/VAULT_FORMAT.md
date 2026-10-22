@@ -64,3 +64,10 @@ The normal worker contains no legacy reader/writer. The old writer is removed.
 
 Container validity does not authenticate a person's identity, prevent rollback,
 hide file size/timestamps, or erase copies held by the operating system.
+
+## Optional KDBX 4.1 (alpha5)
+
+This document describes the age payload. KDBX files use the separate standard
+KeePass container and ordinary entries described in
+[KDBX_COMPATIBILITY.md](KDBX_COMPATIBILITY.md), rather than this JSON envelope.
+Open detects magic bytes; creation requires an explicit format.

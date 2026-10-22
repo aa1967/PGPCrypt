@@ -433,10 +433,10 @@ impl DecryptionHelper for Helper {
                 }
                 let mut pair = key.into_keypair()?;
                 for pkesk in pkesks {
-                    if let Some((algo, session_key)) = pkesk.decrypt(&mut pair, sym_algo) {
-                        if decrypt(algo, &session_key) {
-                            return Ok(Some(cert.clone()));
-                        }
+                    if let Some((algo, session_key)) = pkesk.decrypt(&mut pair, sym_algo)
+                        && decrypt(algo, &session_key)
+                    {
+                        return Ok(Some(cert.clone()));
                     }
                 }
             }

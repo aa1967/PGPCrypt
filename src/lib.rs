@@ -1,6 +1,8 @@
+mod kdbx;
 #[cfg(feature = "legacy-migration")]
 pub mod legacy_vault;
 pub mod pgp;
+pub mod qubes;
 pub mod vault;
 pub mod worker;
 

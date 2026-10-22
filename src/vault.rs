@@ -1,4 +1,4 @@
-//! Standard age v1 passphrase encryption; no application-defined crypto framing.
+//! Standard age v1 or KDBX 4.1 encrypted containers; atomic ciphertext persistence.
 use age::secrecy::SecretString;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
@@ -65,6 +65,28 @@ struct Stored {
     data: VaultData,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VaultFormat {
+    #[default]
+    Age,
+    Kdbx,
+}
+impl VaultFormat {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "" | "age" => Ok(Self::Age),
+            "kdbx" => Ok(Self::Kdbx),
+            _ => bail!("Unsupported vault format"),
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Age => "age",
+            Self::Kdbx => "kdbx",
+        }
+    }
+}
+
 pub struct Vault {
     pub data: VaultData,
     path: PathBuf,
@@ -72,6 +94,8 @@ pub struct Vault {
     // retained in a zeroizing secret while unlocked. It never returns to the UI.
     passphrase: SecretString,
     _lock: File,
+    format: VaultFormat,
+    kdbx: Option<Box<keepass::Database>>,
 }
 
 fn file_error(error: std::io::Error, operation: &str, path: &Path) -> anyhow::Error {
@@ -118,6 +142,17 @@ pub(crate) fn resolve(path: &Path) -> Result<PathBuf> {
 
 impl Vault {
     pub fn create(path: &Path, password: &str) -> Result<Self> {
+        Self::create_format(path, password, VaultFormat::Age)
+    }
+    pub fn create_format(path: &Path, password: &str, format: VaultFormat) -> Result<Self> {
+        Self::create_data(path, password, format, VaultData::default())
+    }
+    fn create_data(
+        path: &Path,
+        password: &str,
+        format: VaultFormat,
+        data: VaultData,
+    ) -> Result<Self> {
         ensure!(
             password.chars().count() >= 16,
             "Use at least 16 characters; prefer randomly chosen words"
@@ -143,10 +178,12 @@ impl Vault {
             "Destination already exists; choose a different filename or open the existing vault"
         );
         let vault = Self {
-            data: VaultData::default(),
+            data,
             path,
             passphrase: SecretString::from(password.to_owned()),
             _lock: lock,
+            format,
+            kdbx: None,
         };
         vault.write(true)?;
         Ok(vault)
@@ -176,6 +213,17 @@ impl Vault {
             bail!(
                 "Legacy alpha1 vault: use pgpcrypt-migrate to create a new age vault; the original is unchanged"
             );
+        }
+        if bytes.starts_with(crate::kdbx::MAGIC) {
+            let (data, db) = crate::kdbx::open(&bytes, password)?;
+            return Ok(Self {
+                data,
+                path,
+                passphrase: SecretString::from(password.to_owned()),
+                _lock: lock,
+                format: VaultFormat::Kdbx,
+                kdbx: Some(Box::new(db)),
+            });
         }
         let decryptor = age::Decryptor::new_buffered(bytes.as_slice())
             .context("Not a supported age v1 vault")?;
@@ -212,7 +260,31 @@ impl Vault {
             path,
             passphrase,
             _lock: lock,
+            format: VaultFormat::Age,
+            kdbx: None,
         })
+    }
+
+    pub fn format(&self) -> VaultFormat {
+        self.format
+    }
+
+    /// Write a distinct encrypted destination; never alter the source.
+    /// KDBX -> age carries only PGPCrypt keys, notes and settings.
+    pub fn convert_copy(
+        &self,
+        destination: &Path,
+        password: &str,
+        format: VaultFormat,
+    ) -> Result<()> {
+        ensure!(
+            resolve(destination)? != self.path,
+            "Choose a different destination; the source is never replaced"
+        );
+        let bytes = Zeroizing::new(serde_json::to_vec(&self.data)?);
+        let data = serde_json::from_slice(&bytes)?;
+        drop(Self::create_data(destination, password, format, data)?);
+        Ok(())
     }
 
     pub fn save(&self) -> Result<()> {
@@ -237,13 +309,27 @@ impl Vault {
         let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
             file_error(error, "write encrypted data in the vault directory", parent)
         })?;
-        let mut recipient = age::scrypt::Recipient::new(self.passphrase.clone());
-        recipient.set_work_factor(WORK_FACTOR);
-        let encryptor =
-            age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))?;
-        let mut writer = encryptor.wrap_output(temp.as_file_mut())?;
-        writer.write_all(&plaintext)?;
-        writer.finish()?;
+        match self.format {
+            VaultFormat::Kdbx => {
+                use age::secrecy::ExposeSecret;
+                crate::kdbx::write(
+                    &self.data,
+                    self.kdbx.as_deref(),
+                    self.passphrase.expose_secret(),
+                    temp.as_file_mut(),
+                )?;
+            }
+            VaultFormat::Age => {
+                let mut recipient = age::scrypt::Recipient::new(self.passphrase.clone());
+                recipient.set_work_factor(WORK_FACTOR);
+                let encryptor = age::Encryptor::with_recipients(std::iter::once(
+                    &recipient as &dyn age::Recipient,
+                ))?;
+                let mut writer = encryptor.wrap_output(temp.as_file_mut())?;
+                writer.write_all(&plaintext)?;
+                writer.finish()?;
+            }
+        }
         temp.as_file().sync_all()?;
         if create {
             temp.persist_noclobber(&self.path)
@@ -359,6 +445,66 @@ mod tests {
             error.downcast_ref::<age::DecryptError>(),
             Some(age::DecryptError::ExcessiveWork { .. })
         ));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod conversion_tests {
+    use super::*;
+    #[test]
+    fn format_conversion_preserves_source_and_saved_data() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let age = dir.path().join("source.age");
+        let kdbx = dir.path().join("portable.kdbx");
+        let back = dir.path().join("back.age");
+        let pass = "disposable conversion password";
+        let mut source = Vault::create(&age, pass)?;
+        let (cert, ticket) = crate::pgp::generate_with_options(
+            &crate::pgp::KeyOptions {
+                name: "Conversion fixture".into(),
+                authentication: false,
+                email: String::new(),
+                comment: String::new(),
+                algorithm: "cv25519".into(),
+                layout: "subkeys".into(),
+                signing: true,
+                certification: true,
+                transport_encryption: true,
+                storage_encryption: true,
+                expires_at: None,
+            },
+            pass,
+        )?;
+        source
+            .data
+            .certificates
+            .push(crate::pgp::encode(&cert)?.to_vec());
+        source.data.revocations.push(RevocationTicket {
+            fingerprint: cert.fingerprint().to_hex(),
+            armor: ticket.clone(),
+        });
+        source.data.notes = "conversion note".into();
+        source.data.idle_timeout_seconds = 120;
+        source.save()?;
+        let original = fs::read(&age)?;
+        assert!(source.convert_copy(&age, pass, VaultFormat::Kdbx).is_err());
+        source.convert_copy(&kdbx, pass, VaultFormat::Kdbx)?;
+        assert_eq!(fs::read(&age)?, original);
+        assert!(source.convert_copy(&kdbx, pass, VaultFormat::Kdbx).is_err());
+        let portable = Vault::open(&kdbx, pass)?;
+        assert_eq!(portable.format(), VaultFormat::Kdbx);
+        assert_eq!(portable.data.notes, "conversion note");
+        assert_eq!(portable.data.idle_timeout_seconds, 120);
+        assert_eq!(portable.data.revocations[0].armor, ticket);
+        let snapshot = fs::read(&kdbx)?;
+        portable.convert_copy(&back, pass, VaultFormat::Age)?;
+        assert_eq!(fs::read(&kdbx)?, snapshot);
+        let restored = Vault::open(&back, pass)?;
+        assert_eq!(restored.data.certificates, source.data.certificates);
+        assert_eq!(restored.data.revocations[0].armor, ticket);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(fs::metadata(kdbx)?.permissions().mode() & 0o777, 0o600);
         Ok(())
     }
 }

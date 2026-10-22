@@ -80,3 +80,9 @@ hardware factors and recovery require a separately reviewed profile and UX.
 Tests include independent Debian Go age decryption of app-generated vaults,
 Go age re-encryption read back by PGPCrypt, wrong passphrases, modified/truncated/
 appended ciphertext, metadata visibility checks, and legacy conversion.
+
+## Alpha5 amendment
+
+Age remains the default. Optional KDBX 4.1 is now implemented at the user's request for independent recovery in KeePassXC. See KDBX_COMPATIBILITY.md for
+the constrained profile, experimental writer status and lossless PGPCrypt-data
+conversion boundaries. Signed Debian backports supplies the newer compiler.

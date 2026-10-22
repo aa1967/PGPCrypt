@@ -3,7 +3,7 @@
 //! encrypted secret packets and an explicit user action.
 use crate::{
     pgp,
-    vault::{RevocationTicket, Vault},
+    vault::{RevocationTicket, Vault, VaultFormat},
 };
 use anyhow::{Context, Result, bail, ensure};
 use sequoia_openpgp::{Cert, policy::StandardPolicy, types::RevocationStatus};
@@ -24,6 +24,8 @@ pub struct Request {
     pub op: String,
     #[serde(default)]
     pub path: String,
+    #[serde(default)]
+    pub format: String,
     #[serde(default)]
     pub password: String,
     #[serde(default)]
@@ -100,13 +102,25 @@ impl Session {
             "create" | "open" => {
                 ensure!(self.vault.is_none(), "Lock the current vault first");
                 self.vault = Some(if request.op == "create" {
-                    Vault::create(Path::new(&request.path), &request.password)?
+                    Vault::create_format(
+                        Path::new(&request.path),
+                        &request.password,
+                        VaultFormat::parse(&request.format)?,
+                    )?
                 } else {
                     Vault::open(Path::new(&request.path), &request.password)?
                 });
                 Ok(
-                    json!({"unlocked":true,"idle_timeout_seconds":self.vault()?.data.idle_timeout_seconds}),
+                    json!({"unlocked":true,"format":self.vault()?.format().name(),"idle_timeout_seconds":self.vault()?.data.idle_timeout_seconds}),
                 )
+            }
+            "convert_copy" => {
+                self.vault()?.convert_copy(
+                    Path::new(&request.path),
+                    &request.password,
+                    VaultFormat::parse(&request.format)?,
+                )?;
+                Ok(json!({"saved":true,"source_unchanged":true}))
             }
             "lock" => {
                 self.vault = None;

@@ -161,7 +161,9 @@ private:
     QLineEdit *path = nullptr, *password = nullptr, *confirmation = nullptr, *search = nullptr, *keyPassword = nullptr;
     QLabel *vaultTitle = nullptr, *confirmationLabel = nullptr, *strengthLabel = nullptr, *passwordHint = nullptr, *matchStatus = nullptr;
     QProgressBar* strengthMeter = nullptr;
-    QComboBox* timeoutChoice = nullptr;
+    QComboBox *timeoutChoice = nullptr, *formatChoice = nullptr;
+    QLabel* formatLabel = nullptr;
+    QString currentFormat = "age";
     QLabel* sessionWarning = nullptr;
     QPushButton* unlockButton = nullptr;
     QLabel *lockedStatus = nullptr, *details = nullptr, *selectionSummary = nullptr;
@@ -282,6 +284,16 @@ private:
         auto* browse = new QPushButton("Browse…"); pathRow->addWidget(path); pathRow->addWidget(browse);
         connect(browse,&QPushButton::clicked,this,[this] { browseVaultPath(creatingVault); });
         form->addRow("Vault file",pathRow);
+        formatChoice = new QComboBox;
+        formatChoice->addItem("age v1", "age"); formatChoice->addItem("KeePass KDBX 4.1 (alpha support)", "kdbx");
+        formatLabel = new QLabel("Vault format"); form->addRow(formatLabel,formatChoice);
+        connect(formatChoice,&QComboBox::currentIndexChanged,this,[this] {
+            auto value=path->text();
+            if(value.endsWith(".pgpcrypt.age")) value.chop(13);
+            else if(value.endsWith(".kdbx")) value.chop(5);
+            else return;
+            path->setText(value+(formatChoice->currentData().toString()=="kdbx"?".kdbx":".pgpcrypt.age"));
+        });
         password = new QLineEdit; password->setEchoMode(QLineEdit::Password);
         password->setMaxLength(256);
         password->setInputMethodHints(Qt::ImhSensitiveData | Qt::ImhNoPredictiveText | Qt::ImhNoAutoUppercase);
@@ -313,12 +325,14 @@ private:
             if(filename.isEmpty()) { fail("Choose a vault file"); return; }
             path->setText(filename); lockedStatus->clear();
             QJsonObject fields{{"path",filename},{"password",password->text()}};
+            if(creatingVault) fields.insert("format",formatChoice->currentData().toString());
             const auto op = creatingVault ? "create" : "open";
             clearVaultCredentials();
             request(op,fields,[this](bool ok,const QJsonObject& data) {
                 if (!ok) return;
                 if(!testing && QGuiApplication::applicationState()!=Qt::ApplicationActive) { endSession(true); return; }
                 unlocked = true; lockAction->setEnabled(true); root->setCurrentWidget(sessionPage);
+                currentFormat=data.value("format").toString("age");
                 applyTimeout(data.value("idle_timeout_seconds").toInt(300));
                 path->clear(); lockedStatus->clear();
                 activityClock.restart();
@@ -370,12 +384,13 @@ private:
 
     void showVaultForm(bool createNew, const QString& selected = {}) {
         creatingVault=createNew; clearVaultCredentials(); lockedStatus->clear();
+        formatChoice->setVisible(createNew); formatLabel->setVisible(createNew);
         password->setMaxLength(createNew?256:32767);
         vaultTitle->setText(createNew?"Create vault":"Open vault");
         confirmation->setVisible(createNew); confirmationLabel->setVisible(createNew);
         strengthLabel->setVisible(createNew); strengthMeter->setVisible(createNew); passwordHint->setVisible(createNew); matchStatus->setVisible(createNew);
         unlockButton->setText(createNew?"Create vault":"Unlock vault");
-        path->setText(selected.isEmpty() && createNew?QDir::home().filePath("vault.pgpcrypt.age"):selected);
+        path->setText(selected.isEmpty() && createNew?QDir::home().filePath(formatChoice->currentData().toString()=="kdbx"?"vault.kdbx":"vault.pgpcrypt.age"):selected);
         root->setCurrentWidget(lockedPage); password->setFocus(); updateVaultSubmit();
     }
 
@@ -384,7 +399,7 @@ private:
         if(!filename.isEmpty()) showVaultForm(false,filename);
     }
 
-    QString chooseVaultPath(bool save, const QString& initial) {
+    QString chooseVaultPath(bool save, const QString& initial, const QString& targetFormat = {}) {
         QFileDialog dialog(this,save?"Choose where to save your vault":"Open vault",initial);
         // The Qt browser keeps selection inside this process. QSettings writes
         // are disabled in main so Qt cannot persist its directory/history.
@@ -393,8 +408,8 @@ private:
         dialog.setOption(QFileDialog::DontConfirmOverwrite);
         dialog.setAcceptMode(save?QFileDialog::AcceptSave:QFileDialog::AcceptOpen);
         dialog.setFileMode(save?QFileDialog::AnyFile:QFileDialog::ExistingFile);
-        dialog.setNameFilters({"PGPCrypt vaults (*.pgpcrypt.age *.age)","All files (*)"});
-        if(save) dialog.setDefaultSuffix("pgpcrypt.age");
+        dialog.setNameFilters({"Encrypted vaults (*.pgpcrypt.age *.age *.kdbx)","All files (*)"});
+        if(save) dialog.setDefaultSuffix((targetFormat.isEmpty()?formatChoice->currentData().toString():targetFormat)=="kdbx"?"kdbx":"pgpcrypt.age");
         if(dialog.exec()!=QDialog::Accepted || dialog.selectedFiles().isEmpty()) return {};
         return absoluteVaultPath(dialog.selectedFiles().first());
     }
@@ -407,12 +422,42 @@ private:
         }
     }
 
+    void convertVault() {
+        if(!unlocked || pending) return;
+        QDialog dialog(this); dialog.setWindowTitle("Save converted vault copy");
+        auto* layout=new QVBoxLayout(&dialog); auto* form=new QFormLayout;
+        auto* info=new QLabel("Copies saved PGPCrypt keys, revocation certificates, notes and settings. Save note edits first. The source stays unchanged and open. Unrelated KeePass entries remain in the source.");
+        info->setWordWrap(true); layout->addWidget(info);
+        auto* format=new QComboBox; format->addItem("age v1","age"); format->addItem("KeePass KDBX 4.1 (alpha support)","kdbx"); format->setCurrentIndex(currentFormat=="age"?1:0); form->addRow("Destination format",format);
+        auto* filename=new QLineEdit; auto* row=new QHBoxLayout; auto* browse=new QPushButton("Browse…"); row->addWidget(filename); row->addWidget(browse); form->addRow("New vault file",row);
+        auto* pass=new QLineEdit; pass->setEchoMode(QLineEdit::Password); pass->setMaxLength(256); pass->setInputMethodHints(Qt::ImhSensitiveData|Qt::ImhNoPredictiveText);
+        auto* confirm=new QLineEdit; confirm->setEchoMode(QLineEdit::Password); confirm->setMaxLength(256); confirm->setInputMethodHints(pass->inputMethodHints());
+        form->addRow("New password/passphrase",pass); form->addRow("Confirm password/passphrase",confirm); layout->addLayout(form);
+        auto* strength=new QLabel("Use at least 16 characters and matching passwords/passphrases."); strength->setTextFormat(Qt::PlainText); layout->addWidget(strength);
+        auto* buttons=new QDialogButtonBox(QDialogButtonBox::Save|QDialogButtonBox::Cancel); layout->addWidget(buttons);
+        auto update=[=] {
+            buttons->button(QDialogButtonBox::Save)->setEnabled(!filename->text().isEmpty() && pass->text().toUcs4().size()>=16 && pass->text()==confirm->text());
+            auto bytes=pass->text().toUtf8(); const double entropy=ZxcvbnMatch(bytes.constData(),nullptr,nullptr); bytes.fill('\0');
+            const QStringList levels{"Very weak","Weak","Fair","Good","Strong"}; int score=entropy<10?0:entropy<20?1:entropy<26.575?2:entropy<33.22?3:4;
+            strength->setText("Estimated strength: "+levels[score]+" • Minimum 16 characters; confirmation required.");
+        };
+        connect(pass,&QLineEdit::textChanged,&dialog,update); connect(confirm,&QLineEdit::textChanged,&dialog,update); connect(filename,&QLineEdit::textChanged,&dialog,update);
+        connect(browse,&QPushButton::clicked,&dialog,[&] { const auto value=chooseVaultPath(true,QDir::homePath(),format->currentData().toString()); if(!value.isEmpty()) filename->setText(value); });
+        connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept); connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject); update();
+        if(dialog.exec()!=QDialog::Accepted) { pass->clear(); confirm->clear(); return; }
+        QJsonObject fields{{"path",absoluteVaultPath(filename->text())},{"password",pass->text()},{"format",format->currentData().toString()}};
+        pass->clear(); confirm->clear();
+        request("convert_copy",fields,[this](bool ok,const QJsonObject&) { if(ok) statusBar()->showMessage("Converted copy saved. Original vault stays open and unchanged."); });
+    }
+
     void buildSession() {
         sessionPage = new QWidget;
         auto* layout = new QVBoxLayout(sessionPage);
         auto* heading = new QHBoxLayout;
         auto* title = new QLabel("Private key workspace"); title->setStyleSheet("font-size: 22px; font-weight: 600;");
         heading->addWidget(title); heading->addStretch();
+        auto* convert = new QPushButton("Save converted copy…"); heading->addWidget(convert);
+        connect(convert,&QPushButton::clicked,this,[this] { convertVault(); });
         auto* lock = new QPushButton("Lock vault  Ctrl+L"); heading->addWidget(lock);
         connect(lock,&QPushButton::clicked,this,[this] { endSession(true); });
         layout->addLayout(heading);
