@@ -4,7 +4,7 @@ The `.deb` is a GitHub **Release asset**, separate from the source checkout.
 Unversioned builds also provide an artifact in [Actions](https://github.com/aa1967/PGPCrypt/actions).
 Public downloads are in [Releases](https://github.com/aa1967/PGPCrypt/releases).
 
-## Alpha3
+## Alpha5
 
 The release workflow runs after a version tag is pushed. It uses Debian 13's
 APT-provided compiler and Qt libraries, builds the package, runs checks on

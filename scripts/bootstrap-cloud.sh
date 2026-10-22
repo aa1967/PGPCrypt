@@ -11,7 +11,7 @@ configure_cloud_apt
     rustfmt rust-clippy
 /usr/bin/apt-get --download-only --reinstall -y install age libsodium-dev libsodium23
 mkdir -p "$tools_root/debian-rust" "$tools_root/debian-sodium"
-for package in "$apt_root"/archives/libllvm22_*.deb "$apt_root"/archives/rustc_*.deb "$apt_root"/archives/cargo_*.deb \
+for package in "$apt_root"/archives/libllvm*_*.deb "$apt_root"/archives/rustc_*.deb "$apt_root"/archives/cargo_*.deb \
     "$apt_root"/archives/libstd-rust-*.deb "$apt_root"/archives/rustfmt_*.deb \
     "$apt_root"/archives/rust-clippy_*.deb "$apt_root"/archives/age_*.deb; do
     case "$(dpkg-deb -f "$package" Package)" in
