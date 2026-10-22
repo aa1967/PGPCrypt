@@ -1,4 +1,4 @@
-# Vault format: age v1 plus encrypted schema 2
+# Vault format: age v1 plus encrypted schema 3
 
 The outer container is the unmodified [age v1 format](https://age-encryption.org/v1),
 implemented by `age` 0.12.1. The app defines no crypto header, nonce format,
@@ -20,12 +20,13 @@ After complete authenticated decryption, the plaintext is UTF-8 JSON:
 ```json
 {
   "application": "PGPCrypt",
-  "schema": 2,
+  "schema": 3,
   "data": {
     "certificates": [],
     "notes": "",
     "revocations": [],
-    "idle_timeout_seconds": 300
+    "idle_timeout_seconds": 300,
+    "default_signing_key": ""
   }
 }
 ```
@@ -36,9 +37,10 @@ material when present. All identity data and indexes are inside encryption.
 revocation signatures are kept separate from the certificates so storing a ticket
 does not apply it. `idle_timeout_seconds` ranges from 60 to 3600.
 
-Schema-1 vaults are read with empty revocations and a 300-second timeout. Every
-save writes schema 2. Older applications reject schema 2; preserve a backup
-before upgrading. Unknown fields and unsupported versions are rejected.
+Schema-1 vaults are read with empty revocations and a 300-second timeout.
+Schemas 1 and 2 default to no saved signing key. Every save writes schema 3,
+which adds the encrypted `default_signing_key` fingerprint (empty means none).
+Older PGPCrypt releases reject schema 3; preserve a backup before upgrading. Unknown fields and unsupported versions are rejected.
 The schema version is private, separate from the public age format version.
 
 The writer pads JSON with spaces to a 4096-byte boundary inside encryption.

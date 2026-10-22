@@ -99,7 +99,7 @@ def main():
 
         terminal_command([age, "--decrypt", "--output", str(plaintext), str(original)])
         decoded = json.loads(plaintext.read_text())
-        assert decoded["application"] == "PGPCrypt" and decoded["schema"] == 2
+        assert decoded["application"] == "PGPCrypt" and decoded["schema"] == 3
         assert decoded["data"]["notes"] == "independent age compatibility fixture"
         assert len(decoded["data"]["certificates"]) == 1
 

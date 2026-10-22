@@ -24,7 +24,7 @@ In that guest root terminal (replace the package path with its transferred path)
 
 ```sh
 apt update
-install -m 644 /home/user/QubesIncoming/DOWNLOAD-QUBE/pgpcrypt_0.1.0.alpha5_amd64.deb /tmp/pgpcrypt.deb
+install -m 644 /home/user/QubesIncoming/DOWNLOAD-QUBE/pgpcrypt_0.1.0.alpha6_amd64.deb /tmp/pgpcrypt.deb
 apt install /tmp/pgpcrypt.deb
 rm /tmp/pgpcrypt.deb
 ```
@@ -61,7 +61,7 @@ PGPCrypt. Incoming transfer requires reopening/unlocking as needed. Clipboard
 contents already copied outside the process cannot be retracted by locking.
 Avoid transferring keys or revocation tickets through everyday client qubes.
 
-## qrexec preparation in alpha5
+## qrexec preparation in alpha6
 
 `src/qubes.rs` defines a separate versioned request decoder for future `sign`
 and `decrypt` RPCs. It accepts one JSON line up to 1 MiB, validates full signing

@@ -47,13 +47,17 @@ normal entry with these custom attributes:
 | OpenPGP.Revocation | Armored emergency revocation certificate, if present |
 
 The three armored fields use KeePass protected values. Reveal and copy the
-needed armor into a trusted OpenPGP tool. Generated private packets retain their
-independent private-key password; it is never stored in a KeePass password field.
-Imported unprotected keys remain unprotected inside the encrypted container and
-need their own passphrase set before exporting them independently.
+needed armor into a trusted OpenPGP tool. Private packets retain their
+independent password if one was chosen; it is never stored in a KeePass password field.
+Keys created or imported without a key password have unprotected secret
+packets inside the encrypted container; take care when copying those packets out.
 
 The `Vault notes and settings` entry holds the protected `Notes` field and
-`PGPCrypt.IdleTimeoutSeconds`. Structural markers and fingerprints must agree;
+`PGPCrypt.IdleTimeoutSeconds`, plus protected `PGPCrypt.DefaultSigningKey`
+(empty means no default). The settings entry uses `PGPCrypt.Schema=2`; key
+entries remain schema 1. Alpha6 reads older schema-1 settings with no default.
+Older PGPCrypt versions reject the new settings schema; KeePassXC can still
+open the standard database. Structural markers and fingerprints must agree;
 duplicate settings, duplicate fingerprints and unknown entries inside this
 group are rejected. Put unrelated KeePass entries in another group or the root.
 Supported unrelated entries, history and custom string fields are retained on
@@ -71,7 +75,7 @@ unchanged. No plaintext temporary file is created. The current session continues
 using the original; lock and open the destination to switch.
 
 Conversion copies saved PGPCrypt keys (including encrypted private packets),
-revocations, notes and idle timeout. Unrelated KeePass entries, history and other
+revocations, notes, idle timeout and default signing key. Unrelated KeePass entries, history and other
 KeePass-only information are not part of an age vault and stay in the source.
 Keep the source until you have opened and checked the destination. Conversion
 is not secure deletion of the original or any backup.

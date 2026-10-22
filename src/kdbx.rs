@@ -248,13 +248,18 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
     let mut fingerprints = HashSet::new();
     for entry in group.entries() {
         ensure!(
-            entry.get(SCHEMA) == Some("1"),
+            entry.get(SCHEMA) == Some("1")
+                || (entry.get(MARKER) == Some("settings") && entry.get(SCHEMA) == Some("2")),
             "Unsupported PGPCrypt KDBX entry schema"
         );
         match entry.get(MARKER) {
             Some("settings") => {
                 ensure!(!settings, "Duplicate PGPCrypt settings");
                 settings = true;
+                data.default_signing_key = entry
+                    .get("PGPCrypt.DefaultSigningKey")
+                    .unwrap_or_default()
+                    .to_owned();
                 data.notes = entry.get("Notes").unwrap_or_default().to_owned();
                 data.idle_timeout_seconds = entry
                     .get("PGPCrypt.IdleTimeoutSeconds")
@@ -387,7 +392,8 @@ pub fn write(
             };
             settings.set_unprotected("Title", "Vault notes and settings");
             settings.set_unprotected(MARKER, "settings");
-            settings.set_unprotected(SCHEMA, "1");
+            settings.set_unprotected(SCHEMA, "2");
+            settings.set_protected("PGPCrypt.DefaultSigningKey", &data.default_signing_key);
             settings.set_protected("Notes", &data.notes);
             settings.set_unprotected(
                 "PGPCrypt.IdleTimeoutSeconds",

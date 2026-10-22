@@ -1,6 +1,6 @@
 //! Bounded, private stdin/stdout protocol for the native desktop session.
-//! There is no listening socket or credential argument. Private export requires
-//! encrypted secret packets and an explicit user action.
+//! There is no listening socket or credential argument. Private export is an
+//! explicit UI action, with disclosure of any unprotected secret packets.
 use crate::{
     pgp,
     vault::{RevocationTicket, Vault, VaultFormat},
@@ -40,6 +40,8 @@ pub struct Request {
     pub key_options: Option<pgp::KeyOptions>,
     #[serde(default)]
     pub idle_timeout_seconds: Option<u32>,
+    #[serde(default)]
+    pub default_signing_key: Option<String>,
 }
 
 #[derive(Default)]
@@ -111,7 +113,7 @@ impl Session {
                     Vault::open(Path::new(&request.path), &request.password)?
                 });
                 Ok(
-                    json!({"unlocked":true,"format":self.vault()?.format().name(),"idle_timeout_seconds":self.vault()?.data.idle_timeout_seconds}),
+                    json!({"unlocked":true,"format":self.vault()?.format().name(),"idle_timeout_seconds":self.vault()?.data.idle_timeout_seconds,"default_signing_key":self.vault()?.data.default_signing_key}),
                 )
             }
             "convert_copy" => {
@@ -128,6 +130,7 @@ impl Session {
             }
             "list" => {
                 let policy = StandardPolicy::new();
+                let vault = self.vault()?;
                 let certs = self.certs()?;
                 let keys: Vec<_> = certs.iter().map(|cert| {
                     let status = match cert.with_policy(&policy, None) {
@@ -139,20 +142,24 @@ impl Session {
                     json!({"fingerprint":cert.fingerprint().to_hex(),
                         "identities":cert.userids().map(|u|String::from_utf8_lossy(u.userid().value()).into_owned()).collect::<Vec<_>>(),
                         "has_secret":cert.is_tsk(), "status":status,
+                        "has_revocation":vault.data.revocations.iter().any(|r|r.fingerprint==cert.fingerprint().to_hex()),
+                        "secret_protected":cert.is_tsk() && cert.keys().secret().all(|ka|ka.key().secret().is_encrypted()),
                         "algorithm":cert.primary_key().key().pk_algo().to_string(),
                         "expires_at":cert.with_policy(&policy,None).ok().and_then(|c| c.primary_key().key_expiration_time()).and_then(|t|t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d|d.as_secs()),
                         "capabilities":cert.keys().with_policy(&policy,None).supported().filter_map(|ka|ka.key_flags()).map(|f|format!("{f:?}")).collect::<Vec<_>>(),
                         "can_encrypt":status == "Valid" && cert.keys().with_policy(&policy,None).supported().alive().revoked(false).any(|ka|ka.key_flags().is_some_and(|flags| flags.for_transport_encryption() || flags.for_storage_encryption())),
                         "can_sign":status == "Valid" && cert.keys().secret().with_policy(&policy,None).supported().alive().revoked(false).for_signing().next().is_some()})
                 }).collect();
-                Ok(json!({"keys":keys}))
+                Ok(
+                    json!({"keys":keys,"default_signing_key":self.vault()?.data.default_signing_key}),
+                )
             }
             "generate" => {
                 self.vault()?;
                 let options = request
                     .key_options
                     .as_ref()
-                    .context("Key options and a private-key passphrase are required")?;
+                    .context("Key options are required")?;
                 let (cert, armor) = pgp::generate_with_options(options, &request.password)?;
                 let fingerprint = cert.fingerprint().to_hex();
                 // A generated key and its emergency ticket commit in one snapshot.
@@ -191,6 +198,16 @@ impl Session {
                     .find(|c| c.fingerprint().to_hex() == request.fingerprint)
                     .context("Select a private key")?;
                 Ok(json!({"text":pgp::protected_private_armor(&cert)?.as_str()}))
+            }
+            "private_export" => {
+                let cert = self
+                    .certs()?
+                    .into_iter()
+                    .find(|c| c.fingerprint().to_hex() == request.fingerprint)
+                    .context("Select a private key")?;
+                Ok(
+                    json!({"text":pgp::private_armor(&cert)?.as_str(),"protected":cert.keys().secret().all(|ka|ka.key().secret().is_encrypted())}),
+                )
             }
             "protect_private_key" => {
                 let cert = self
@@ -238,26 +255,68 @@ impl Session {
                 Ok(json!({"text":pgp::revocation_ticket(&cert,&request.password)?}))
             }
             "settings_set" => {
-                let seconds = request
-                    .idle_timeout_seconds
-                    .context("Choose an idle timeout")?;
                 ensure!(
-                    (60..=3600).contains(&seconds),
-                    "Idle timeout must be between 1 and 60 minutes"
+                    request.idle_timeout_seconds.is_some() || request.default_signing_key.is_some(),
+                    "Choose a setting to save"
                 );
+                if let Some(seconds) = request.idle_timeout_seconds {
+                    ensure!(
+                        (60..=3600).contains(&seconds),
+                        "Idle timeout must be between 1 and 60 minutes"
+                    );
+                }
+                if let Some(fp) = request
+                    .default_signing_key
+                    .as_ref()
+                    .filter(|fp| !fp.is_empty())
+                {
+                    let cert = self
+                        .certs()?
+                        .into_iter()
+                        .find(|c| c.fingerprint().to_hex() == *fp)
+                        .context("Choose an available private signing key")?;
+                    let policy = StandardPolicy::new();
+                    let valid = cert.with_policy(&policy, None)?;
+                    valid.alive()?;
+                    ensure!(
+                        !matches!(valid.revocation_status(), RevocationStatus::Revoked(_))
+                            && cert
+                                .keys()
+                                .secret()
+                                .with_policy(&policy, None)
+                                .supported()
+                                .alive()
+                                .revoked(false)
+                                .for_signing()
+                                .next()
+                                .is_some(),
+                        "Choose a valid private signing key"
+                    );
+                }
                 let vault = self.vault.as_mut().context("Vault is locked")?;
-                let old = std::mem::replace(&mut vault.data.idle_timeout_seconds, seconds);
+                let old_timeout = vault.data.idle_timeout_seconds;
+                let old_default = Zeroizing::new(vault.data.default_signing_key.clone());
+                if let Some(seconds) = request.idle_timeout_seconds {
+                    vault.data.idle_timeout_seconds = seconds;
+                }
+                if let Some(fp) = &request.default_signing_key {
+                    vault.data.default_signing_key = fp.clone();
+                }
                 if let Err(error) = vault.save() {
-                    vault.data.idle_timeout_seconds = old;
+                    vault.data.idle_timeout_seconds = old_timeout;
+                    vault.data.default_signing_key.zeroize();
+                    vault.data.default_signing_key = old_default.to_string();
                     return Err(error);
                 }
-                Ok(json!({"saved":true,"idle_timeout_seconds":seconds}))
+                Ok(
+                    json!({"saved":true,"idle_timeout_seconds":vault.data.idle_timeout_seconds,"default_signing_key":vault.data.default_signing_key}),
+                )
             }
             "encrypt" => {
                 let all = self.certs()?;
                 ensure!(
                     !request.recipients.is_empty(),
-                    "Select recipients in the Keys table"
+                    "Select recipients on the notepad"
                 );
                 ensure!(
                     request
@@ -273,10 +332,15 @@ impl Session {
                 Ok(json!({"text":pgp::encrypt(&request.text, &selected)?}))
             }
             "sign" => {
+                let fingerprint = if request.fingerprint.is_empty() {
+                    &self.vault()?.data.default_signing_key
+                } else {
+                    &request.fingerprint
+                };
                 let cert = self
                     .certs()?
                     .into_iter()
-                    .find(|c| c.fingerprint().to_hex() == request.fingerprint)
+                    .find(|c| c.fingerprint().to_hex() == *fingerprint)
                     .context("Choose a signing key")?;
                 Ok(json!({"text":pgp::sign(&request.text,&cert,&request.password)?}))
             }

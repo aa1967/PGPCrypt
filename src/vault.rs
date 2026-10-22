@@ -33,6 +33,8 @@ pub struct VaultData {
     pub revocations: Vec<RevocationTicket>,
     #[serde(default = "default_timeout")]
     pub idle_timeout_seconds: u32,
+    #[serde(default)]
+    pub default_signing_key: String,
 }
 
 fn default_timeout() -> u32 {
@@ -46,6 +48,7 @@ impl Default for VaultData {
             notes: String::new(),
             revocations: Vec::new(),
             idle_timeout_seconds: default_timeout(),
+            default_signing_key: String::new(),
         }
     }
 }
@@ -248,7 +251,7 @@ impl Vault {
         // No decoded data is exposed until the complete age stream authenticates.
         let stored: Stored = serde_json::from_slice(&plaintext).context("Invalid vault schema")?;
         ensure!(
-            stored.application == "PGPCrypt" && matches!(stored.schema, 1 | 2),
+            stored.application == "PGPCrypt" && matches!(stored.schema, 1..=3),
             "Unsupported vault schema"
         );
         ensure!(
@@ -294,7 +297,7 @@ impl Vault {
     fn write(&self, create: bool) -> Result<()> {
         let mut plaintext = Zeroizing::new(serde_json::to_vec(&StoredRef {
             application: "PGPCrypt",
-            schema: 2,
+            schema: 3,
             data: &self.data,
         })?);
         let size = plaintext.len().div_ceil(PAD) * PAD;

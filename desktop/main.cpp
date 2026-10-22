@@ -19,6 +19,8 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QHeaderView>
+#include <QInputDialog>
+#include <QSignalBlocker>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -171,7 +173,10 @@ private:
     QTabWidget* tabs = nullptr;
     QPlainTextEdit *importText = nullptr, *input = nullptr, *output = nullptr, *notes = nullptr;
     QAction* lockAction = nullptr;
-    QString signer;
+    QString signer, defaultSigner;
+    QListWidget* recipientChoices = nullptr;
+    QComboBox* signingChoice = nullptr;
+    QLabel* defaultKeyLabel = nullptr;
     QString testFingerprint;
 
     void fail(const QString& message) {
@@ -476,7 +481,7 @@ private:
         });
         layout->addLayout(timeoutRow);
         auto* split = new QSplitter;
-        auto* navigation = new QListWidget; navigation->addItems({"Keys & identities","Text workspace","Encrypted notes"}); navigation->setMaximumWidth(185);
+        auto* navigation = new QListWidget; navigation->addItems({"Keys & identities","Notepad","Encrypted notes"}); navigation->setMaximumWidth(185);
         split->addWidget(navigation);
         tabs = new QTabWidget;
         tabs->tabBar()->hide();
@@ -509,7 +514,7 @@ private:
     void buildKeys() {
         auto* page = new QWidget; auto* layout = new QVBoxLayout(page);
         search = new QLineEdit; search->setPlaceholderText("Filter identities or fingerprints…"); layout->addWidget(search);
-        keys = new QTableWidget(0,5); keys->setHorizontalHeaderLabels({"Encrypt to","Identity","Key material","Status","Fingerprint"});
+        keys = new QTableWidget(0,5); keys->setHorizontalHeaderLabels({"Default","Identity","Key material","Status","Fingerprint"});
         keys->setSelectionBehavior(QAbstractItemView::SelectRows); keys->setSelectionMode(QAbstractItemView::SingleSelection);
         keys->setEditTriggers(QAbstractItemView::NoEditTriggers); keys->setAlternatingRowColors(true);
         keys->horizontalHeader()->setSectionResizeMode(1,QHeaderView::Stretch); keys->horizontalHeader()->setSectionResizeMode(4,QHeaderView::ResizeToContents);
@@ -522,12 +527,7 @@ private:
             const int row=keys->currentRow(); if(row<0) return;
             details->setText(keys->item(row,1)->text()+"\n"+keys->item(row,4)->text()+"\n"+keys->item(row,4)->data(Qt::UserRole+2).toString()+"\nCheck this fingerprint through an independent channel.");
         });
-        connect(keys,&QTableWidget::itemChanged,this,[this](QTableWidgetItem* item) {
-            if(item->column()==0 && selectionSummary) updateSelection();
-        });
         auto* actions = new QHBoxLayout;
-        auto* chooseSigner = new QPushButton("Use selected key for signing"); actions->addWidget(chooseSigner);
-        connect(chooseSigner,&QPushButton::clicked,this,[this] { const int row=keys->currentRow(); if(row<0 || !keys->item(row,4)->data(Qt::UserRole+1).toBool()) { fail("Select a valid private signing key"); return; } signer=keys->item(row,4)->text(); updateSelection(); statusBar()->showMessage("Signing key selected: "+signer); });
         auto* publicExport = new QPushButton("Show public export"); actions->addWidget(publicExport);
         connect(publicExport,&QPushButton::clicked,this,[this] {
             const int row=keys->currentRow(); if(row<0) { fail("Select a key"); return; }
@@ -535,22 +535,25 @@ private:
         });
         layout->addLayout(actions);
         auto* backupActions = new QHBoxLayout;
-        auto* privateExport = new QPushButton("Show protected private key"); backupActions->addWidget(privateExport);
+        auto* privateExport = new QPushButton("Show private key"); backupActions->addWidget(privateExport);
         connect(privateExport,&QPushButton::clicked,this,[this] {
-            if(QMessageBox::question(this,"Export private key","Display the passphrase-protected private key for backup? Copying it puts it outside this vault's protection.") == QMessageBox::Yes)
-                exportSelected("protected_private_export");
+            const int row=keys->currentRow(); if(row<0 || !keys->item(row,4)->data(Qt::UserRole+5).toBool()) { fail("Select a private key"); return; }
+            const bool protectedKey=keys->item(row,4)->data(Qt::UserRole+3).toBool();
+            const auto message=protectedKey?QString("Display the password-protected private key for backup? Copying it puts it outside the vault."):QString("This key contains private packets without password protection. Anyone who gets those packets can use them. Display it for backup?");
+            if(QMessageBox::question(this,"Export private key",message) == QMessageBox::Yes)
+                exportSelected("private_export");
         });
         auto* revocation = new QPushButton("Show revocation certificate"); backupActions->addWidget(revocation);
         connect(revocation,&QPushButton::clicked,this,[this] {
             if(QMessageBox::question(this,"Revocation certificate","Anyone with this certificate can revoke your key. Keep an offline backup. Creating or displaying it does not revoke the key.") == QMessageBox::Yes)
                 exportSelected("revocation_export");
         });
-        auto* protect = new QPushButton("Protect / change key passphrase…"); backupActions->addWidget(protect);
+        auto* protect = new QPushButton("Set / change / remove key password…"); backupActions->addWidget(protect);
         connect(protect,&QPushButton::clicked,this,[this] { protectKeyDialog(); });
         layout->addLayout(backupActions);
         auto* lower = new QTabWidget;
         auto* generatePage = new QWidget; auto* generateLayout = new QVBoxLayout(generatePage);
-        auto* description = new QLabel("Create an OpenPGP identity with an optional email/comment, expiry, capabilities and a separate private-key passphrase. An emergency revocation certificate is saved inside the vault.");
+        auto* description = new QLabel("Create an OpenPGP identity with an optional email/comment, expiry, capabilities and an optional private-key password. An emergency revocation certificate is saved inside the vault.");
         description->setWordWrap(true); generateLayout->addWidget(description);
         auto* generate = new QPushButton("Create key…"); generateLayout->addWidget(generate); generateLayout->addStretch();
         connect(generate,&QPushButton::clicked,this,[this] { createKeyDialog(); });
@@ -566,13 +569,16 @@ private:
     void exportSelected(const QString& operation) {
         const int row=keys->currentRow(); if(row<0) { fail("Select a key"); return; }
         QJsonObject fields{{"fingerprint",keys->item(row,4)->text()}};
-        // Imported keys need their primary-key password only if no saved ticket
-        // exists. Keep password entry on the normal text workspace.
-        fields.insert("password",keyPassword->text()); keyPassword->clear();
+        if(operation=="revocation_export" && !keys->item(row,4)->data(Qt::UserRole+4).toBool() && keys->item(row,4)->data(Qt::UserRole+3).toBool()) {
+            bool accepted=false;
+            auto pass=QInputDialog::getText(this,"Create revocation certificate","Private-key password/passphrase",QLineEdit::Password,{},&accepted);
+            if(!accepted) return;
+            fields.insert("password",pass); pass.fill(QChar('\0'));
+        }
         request(operation,fields,[this,operation](bool ok,const QJsonObject& data) {
             if(ok) {
                 output->setPlainText(data.value("text").toString()); tabs->setCurrentIndex(1);
-                statusBar()->showMessage(operation=="revocation_export"?"Revocation certificate: back up privately; do not publish until revoking.":"Private export: encrypted with the key passphrase, independently of the vault.");
+                statusBar()->showMessage(operation=="revocation_export"?"Revocation certificate: back up privately; do not publish until revoking.":(data.value("protected").toBool()?"Private export: protected by its separate key password.":"Private export includes unprotected secret packets; keep the text private."));
             }
         });
     }
@@ -608,15 +614,15 @@ private:
         connect(expire,&QCheckBox::toggled,date,&QWidget::setEnabled); form->addRow(expire,date);
         auto* pass=new QLineEdit; auto* confirm=new QLineEdit;
         for(auto* field : {pass,confirm}) { field->setEchoMode(QLineEdit::Password); field->setInputMethodHints(Qt::ImhSensitiveData | Qt::ImhNoPredictiveText | Qt::ImhNoAutoUppercase); }
-        form->addRow("Private-key passphrase",pass); form->addRow("Confirm passphrase",confirm);
+        form->addRow("Private-key password/passphrase (optional)",pass); form->addRow("Confirm password/passphrase",confirm);
         layout->addLayout(form);
-        auto* hint=new QLabel("At least 16 characters. This password protects exported private keys too. RSA-1024 and DSA/ElGamal creation are unavailable; import legacy keys instead."); hint->setWordWrap(true); layout->addWidget(hint);
+        auto* hint=new QLabel("Leave both password fields blank for no separate key password. Any nonempty password is accepted and protects exported private keys too. RSA-1024 and DSA/ElGamal creation are unavailable; import legacy keys instead."); hint->setWordWrap(true); layout->addWidget(hint);
         auto* error=new QLabel; error->setTextFormat(Qt::PlainText); error->setWordWrap(true); layout->addWidget(error);
         auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel); layout->addWidget(buttons);
         connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
         connect(buttons,&QDialogButtonBox::accepted,&dialog,[=,&dialog] {
             if(name->text().trimmed().isEmpty()) { error->setText("Enter a name or pseudonym."); return; }
-            if(pass->text().toUcs4().size()<16 || pass->text()!=confirm->text()) { error->setText("Use at least 16 characters and matching passphrases."); return; }
+            if(pass->text()!=confirm->text()) { error->setText("Passwords/passphrases do not match."); return; }
             if(!certify->isChecked() && !signing->isChecked() && !transport->isChecked() && !storage->isChecked() && !authentication->isChecked()) { error->setText("Select at least one capability."); return; }
             if(expire->isChecked() && date->dateTime() <= QDateTime::currentDateTimeUtc().addSecs(60)) { error->setText("Choose an expiry at least one minute in the future."); return; }
             dialog.accept();
@@ -632,15 +638,16 @@ private:
     void protectKeyDialog() {
         const int row=keys->currentRow(); if(row<0) { fail("Select a private key"); return; }
         const QString fingerprint=keys->item(row,4)->text();
-        QDialog dialog(this); dialog.setWindowTitle("Protect private key"); auto* form=new QFormLayout(&dialog);
+        QDialog dialog(this); dialog.setWindowTitle("Private-key password"); auto* form=new QFormLayout(&dialog);
         auto* current=new QLineEdit; auto* pass=new QLineEdit; auto* confirm=new QLineEdit;
         for(auto* field : {current,pass,confirm}) { field->setEchoMode(QLineEdit::Password); field->setInputMethodHints(Qt::ImhSensitiveData | Qt::ImhNoPredictiveText | Qt::ImhNoAutoUppercase); }
-        form->addRow("Current passphrase (if protected)",current); form->addRow("New passphrase (16+ characters)",pass); form->addRow("Confirm new passphrase",confirm);
+        form->addRow("Current passphrase (if protected)",current); form->addRow("New password/passphrase (optional)",pass); form->addRow("Confirm new passphrase",confirm);
+        auto* hint=new QLabel("Leave both new password fields blank to remove the key password. The vault remains encrypted."); hint->setWordWrap(true); form->addRow(hint);
         auto* error=new QLabel; error->setTextFormat(Qt::PlainText); form->addRow(error);
         auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel); form->addRow(buttons);
         connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);
         connect(buttons,&QDialogButtonBox::accepted,&dialog,[=,&dialog] {
-            if(pass->text().toUcs4().size()<16 || pass->text()!=confirm->text()) { error->setText("Use at least 16 characters and matching passphrases."); return; }
+            if(pass->text()!=confirm->text()) { error->setText("Passwords/passphrases do not match."); return; }
             dialog.accept();
         });
         if(dialog.exec()!=QDialog::Accepted) { current->clear(); pass->clear(); confirm->clear(); return; }
@@ -652,34 +659,66 @@ private:
     void refreshKeys(std::function<void()> after = {}) {
         request("list",{},[this,after](bool ok,const QJsonObject& data) {
             if(!ok) return;
-            keys->setRowCount(0);
+            QStringList chosenRecipients;
+            for(int i=0;i<recipientChoices->count();++i) if(recipientChoices->item(i)->checkState()==Qt::Checked) chosenRecipients.append(recipientChoices->item(i)->data(Qt::UserRole).toString());
+            const auto previousSigner=signingChoice->currentData().toString();
+            defaultSigner=data.value("default_signing_key").toString();
+            QSignalBlocker signingBlock(signingChoice), recipientsBlock(recipientChoices);
+            keys->setRowCount(0); recipientChoices->clear(); signingChoice->clear(); signingChoice->addItem("Select a signing key",QString());
             for(const auto& entry:data.value("keys").toArray()) {
                 const auto key=entry.toObject(); const int row=keys->rowCount(); keys->insertRow(row);
-                auto* recipient=new QTableWidgetItem;
-                recipient->setFlags(Qt::ItemIsEnabled | Qt::ItemIsUserCheckable | Qt::ItemIsSelectable);
-                recipient->setCheckState(Qt::Unchecked); if(!key.value("can_encrypt").toBool()) recipient->setFlags(Qt::NoItemFlags);
-                keys->setItem(row,0,recipient);
+                const auto fp=key.value("fingerprint").toString();
+                keys->setItem(row,0,new QTableWidgetItem(fp==defaultSigner?"Default":""));
                 QStringList identities; for(const auto& value:key.value("identities").toArray()) identities.append(value.toString());
-                keys->setItem(row,1,new QTableWidgetItem(identities.join("; ")));
-                keys->setItem(row,2,new QTableWidgetItem(key.value("has_secret").toBool()?"Public + private":"Public only"));
+                const auto identity=identities.isEmpty()?fp:identities.join("; ");
+                keys->setItem(row,1,new QTableWidgetItem(identity));
+                keys->setItem(row,2,new QTableWidgetItem(key.value("has_secret").toBool()?(key.value("secret_protected").toBool()?"Private (password)":"Private (unprotected packets)"):"Public only"));
                 keys->setItem(row,3,new QTableWidgetItem(key.value("status").toString()));
-                auto* fingerprint=new QTableWidgetItem(key.value("fingerprint").toString()); fingerprint->setData(Qt::UserRole+1,key.value("can_sign").toBool());
+                auto* fingerprint=new QTableWidgetItem(fp); fingerprint->setData(Qt::UserRole+1,key.value("can_sign").toBool());
+                fingerprint->setData(Qt::UserRole+3,key.value("secret_protected").toBool());
+                fingerprint->setData(Qt::UserRole+4,key.value("has_revocation").toBool());
+                fingerprint->setData(Qt::UserRole+5,key.value("has_secret").toBool());
                 QStringList capabilities; for(const auto& value:key.value("capabilities").toArray()) capabilities.append(value.toString());
                 const auto expires=key.value("expires_at");
                 fingerprint->setData(Qt::UserRole+2,key.value("algorithm").toString()+" • Expires: "+(expires.isNull()?QString("never"):QDateTime::fromSecsSinceEpoch(expires.toInteger(),QTimeZone::UTC).toString(Qt::ISODate))+"\nCapabilities: "+capabilities.join("; "));
                 keys->setItem(row,4,fingerprint);
+                if(key.value("can_encrypt").toBool()) {
+                    auto* recipient=new QListWidgetItem(identity+" — "+fp,recipientChoices); recipient->setData(Qt::UserRole,fp); recipient->setToolTip(fp);
+                    recipient->setFlags(Qt::ItemIsEnabled|Qt::ItemIsUserCheckable|Qt::ItemIsSelectable);
+                    recipient->setCheckState(chosenRecipients.contains(fp)?Qt::Checked:Qt::Unchecked);
+                }
+                if(key.value("can_sign").toBool()) { signingChoice->addItem(identity+" — "+fp,fp); signingChoice->setItemData(signingChoice->count()-1,fp,Qt::ToolTipRole); }
             }
+            const auto wanted=previousSigner.isEmpty()?defaultSigner:previousSigner;
+            signingChoice->setCurrentIndex(qMax(0,signingChoice->findData(wanted)));
+            updateSelection();
+            signingBlock.unblock(); recipientsBlock.unblock();
             if(after) after();
         });
     }
 
     void buildText() {
         auto* page=new QWidget; auto* layout=new QVBoxLayout(page);
-        auto* label=new QLabel("Recipients are checked in the key table. Signatures and public exports can link identities. Text is not automatically saved."); label->setWordWrap(true); layout->addWidget(label);
+        auto* label=new QLabel("Select recipients and a signing key here. Text is not automatically saved."); label->setWordWrap(true); layout->addWidget(label);
+        auto* form=new QFormLayout;
+        recipientChoices=new QListWidget; recipientChoices->setMaximumHeight(125); form->addRow("Encrypt to",recipientChoices);
+        signingChoice=new QComboBox; signingChoice->setMinimumContentsLength(24); signingChoice->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        signingChoice->addItem("Select a signing key",QString()); form->addRow("Signing key",signingChoice); layout->addLayout(form);
+        auto* defaults=new QHBoxLayout;
+        auto* setDefault=new QPushButton("Use signing key as default"); defaults->addWidget(setDefault);
+        auto* clearDefault=new QPushButton("Clear default"); defaults->addWidget(clearDefault); defaults->addStretch(); layout->addLayout(defaults);
+        defaultKeyLabel=new QLabel; defaultKeyLabel->setTextFormat(Qt::PlainText); defaultKeyLabel->setWordWrap(true); layout->addWidget(defaultKeyLabel);
+        connect(setDefault,&QPushButton::clicked,this,[this] {
+            const auto fp=signingChoice->currentData().toString(); if(fp.isEmpty()) { fail("Choose a signing key on the notepad"); return; }
+            saveDefaultKey(fp);
+        });
+        connect(clearDefault,&QPushButton::clicked,this,[this] { saveDefaultKey({}); });
+        connect(signingChoice,&QComboBox::currentIndexChanged,this,[this] { updateSelection(); });
+        connect(recipientChoices,&QListWidget::itemChanged,this,[this] { updateSelection(); });
         selectionSummary=new QLabel; selectionSummary->setTextFormat(Qt::PlainText); selectionSummary->setWordWrap(true); layout->addWidget(selectionSummary);
         input=editor("Paste plaintext or an armored OpenPGP message…"); output=editor("Result appears here after authentication succeeds.",true);
         auto* panes=new QSplitter(Qt::Vertical); panes->addWidget(input); panes->addWidget(output); layout->addWidget(panes,1);
-        keyPassword=new QLineEdit; keyPassword->setEchoMode(QLineEdit::Password); keyPassword->setPlaceholderText("Private-key passphrase for signing, decryption, or an imported key's revocation certificate"); keyPassword->setInputMethodHints(Qt::ImhSensitiveData | Qt::ImhNoPredictiveText); layout->addWidget(keyPassword);
+        keyPassword=new QLineEdit; keyPassword->setEchoMode(QLineEdit::Password); keyPassword->setPlaceholderText("Private-key password/passphrase (leave blank for a key without one)"); keyPassword->setInputMethodHints(Qt::ImhSensitiveData | Qt::ImhNoPredictiveText); layout->addWidget(keyPassword);
         auto* actions=new QHBoxLayout;
         for(const auto& name:QStringList{"Encrypt","Decrypt","Sign","Verify"}) {
             auto* button=new QPushButton(name); actions->addWidget(button);
@@ -689,23 +728,28 @@ private:
         connect(clear,&QPushButton::clicked,this,[this]{ input->clear(); output->clear(); keyPassword->clear(); });
         layout->addLayout(actions);
         layout->addWidget(new QLabel("Undo history is disabled. Clipboard managers may retain copied text after locking."));
-        tabs->addTab(page,"Text");
+        tabs->addTab(page,"Notepad");
+    }
+
+    void saveDefaultKey(const QString& fingerprint) {
+        request("settings_set",{{"default_signing_key",fingerprint}},[this](bool ok,const QJsonObject&) {
+            if(ok) { refreshKeys(); statusBar()->showMessage("Default signing key saved inside the encrypted vault"); }
+        });
     }
 
     void updateSelection() {
         if(!selectionSummary) return;
+        signer=signingChoice->currentData().toString();
         QStringList recipients;
-        for(int row=0;row<keys->rowCount();++row) {
-            if(keys->item(row,0) && keys->item(row,4) && keys->item(row,0)->checkState()==Qt::Checked)
-                recipients.append(keys->item(row,4)->text());
-        }
-        selectionSummary->setText("Recipients: "+(recipients.isEmpty()?QString("none"):recipients.join(", "))
-            +"\nSigner: "+(signer.isEmpty()?QString("none"):signer));
+        for(int i=0;i<recipientChoices->count();++i) if(recipientChoices->item(i)->checkState()==Qt::Checked) recipients.append(recipientChoices->item(i)->data(Qt::UserRole).toString());
+        selectionSummary->setText("Recipients: "+(recipients.isEmpty()?QString("none"):recipients.join(", "))+"\nSigner: "+(signer.isEmpty()?QString("none"):signer));
+        defaultKeyLabel->setText(defaultSigner.isEmpty()?"Default signing key: none":"Default signing key: "+defaultSigner+(signingChoice->findData(defaultSigner)<0?" (unavailable for signing)":""));
     }
 
     void textAction(const QString& operation, std::function<void()> after = {}) {
+        if(operation=="sign" && signer.isEmpty()) { fail("Select a signing key on the notepad"); return; }
         QJsonArray recipients;
-        for(int row=0;row<keys->rowCount();++row) if(keys->item(row,0)->checkState()==Qt::Checked) recipients.append(keys->item(row,4)->text());
+        for(int i=0;i<recipientChoices->count();++i) if(recipientChoices->item(i)->checkState()==Qt::Checked) recipients.append(recipientChoices->item(i)->data(Qt::UserRole).toString());
         QJsonObject fields{{"text",input->toPlainText()},{"password",keyPassword->text()},{"fingerprint",signer},{"recipients",recipients}};
         output->clear(); keyPassword->clear();
         request(operation,fields,[this,operation,after](bool ok,const QJsonObject& data) {
@@ -756,34 +800,47 @@ private:
             fail("Default vault was not created privately in the current user's home"); return;
         }
         QJsonObject options{{"name","Desktop fixture"},{"email","fixture@example.invalid"},{"algorithm","cv25519"},{"layout","subkeys"},{"signing",true},{"certification",true},{"transport_encryption",true},{"storage_encryption",true},{"expires_at",QJsonValue(QJsonValue::Null)}};
-        request("generate",{{"key_options",options},{"password","disposable Qt key passphrase"}},[this](bool ok,const QJsonObject&) {
+        request("generate",{{"key_options",options},{"password",testKdbx?"":"x"}},[this](bool ok,const QJsonObject&) {
             if(!ok) return;
             refreshKeys([this] {
                 if(keys->rowCount()!=1) { fail("Key table did not populate"); return; }
-                keys->item(0,0)->setCheckState(Qt::Checked); keys->selectRow(0);
-                testFingerprint=signer=keys->item(0,4)->text();
-                tabs->setCurrentIndex(1); input->setPlainText("Qt desktop private fixture");
-                textAction("encrypt",[this] {
+                keys->selectRow(0);
+                testFingerprint=keys->item(0,4)->text();
+                if(recipientChoices->count()!=1 || signingChoice->findData(testFingerprint)<1) { fail("Notepad key choices did not populate"); return; }
+                recipientChoices->item(0)->setCheckState(Qt::Checked); signingChoice->setCurrentIndex(signingChoice->findData(testFingerprint));
+                request("settings_set",{{"default_signing_key",testFingerprint}},[this](bool ok,const QJsonObject&) {
+                    if(!ok) return;
+                    signingChoice->setCurrentIndex(0);
+                    refreshKeys([this] {
+                        if(defaultSigner!=testFingerprint || signer!=testFingerprint || recipientChoices->item(0)->checkState()!=Qt::Checked) { fail("Notepad default or recipients were not restored"); return; }
+                        if(!tabs->widget(1)->isAncestorOf(signingChoice) || !tabs->widget(1)->isAncestorOf(recipientChoices)) { fail("Key controls are outside the notepad"); return; }
+                        testNotepadWorkflow();
+                    });
+                });
+            });
+        });
+    }
+    void testNotepadWorkflow() {
+        tabs->setCurrentIndex(1); input->setPlainText("Qt desktop private fixture");
+        textAction("encrypt",[this] {
+            input->setPlainText(output->toPlainText());
+            keyPassword->setText(testKdbx?"":"x");
+            textAction("decrypt",[this] {
+                if(output->toPlainText()!="Qt desktop private fixture") { fail("Decryption mismatch"); return; }
+                input->setPlainText("Qt signature fixture");
+                keyPassword->setText(testKdbx?"":"x");
+                textAction("sign",[this] {
                     input->setPlainText(output->toPlainText());
-                    keyPassword->setText("disposable Qt key passphrase");
-                    textAction("decrypt",[this] {
-                        if(output->toPlainText()!="Qt desktop private fixture") { fail("Decryption mismatch"); return; }
-                        input->setPlainText("Qt signature fixture");
-                        keyPassword->setText("disposable Qt key passphrase");
-                        textAction("sign",[this] {
-                            input->setPlainText(output->toPlainText());
-                            textAction("verify",[this] {
-                                if(output->toPlainText()!="Qt signature fixture") { fail("Verification mismatch"); return; }
-                                request("notes_set",{{"text","encrypted Qt note"}},[this](bool ok,const QJsonObject&) {
-                                    if(!ok) return;
-                                    request("notes_get",{},[this](bool ok,const QJsonObject& data) {
-                                        if(!ok || data.value("text").toString()!="encrypted Qt note") { fail("Notes mismatch"); return; }
-                                        tabs->setCurrentIndex(0);
-                                        QTimer::singleShot(100,this,[this] {
-                                            if(!screenshotPath.isEmpty() && !grab().save(screenshotPath)) { fail("Screenshot failed"); return; }
-                                            endSession(true);
-                                        });
-                                    });
+                    textAction("verify",[this] {
+                        if(output->toPlainText()!="Qt signature fixture") { fail("Verification mismatch"); return; }
+                        request("notes_set",{{"text","encrypted Qt note"}},[this](bool ok,const QJsonObject&) {
+                            if(!ok) return;
+                            request("notes_get",{},[this](bool ok,const QJsonObject& data) {
+                                if(!ok || data.value("text").toString()!="encrypted Qt note") { fail("Notes mismatch"); return; }
+                                tabs->setCurrentIndex(0);
+                                QTimer::singleShot(100,this,[this] {
+                                    if(!screenshotPath.isEmpty() && !grab().save(screenshotPath)) { fail("Screenshot failed"); return; }
+                                    endSession(true);
                                 });
                             });
                         });
@@ -792,6 +849,7 @@ private:
             });
         });
     }
+
 };
 }
 

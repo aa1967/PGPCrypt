@@ -71,10 +71,6 @@ pub struct KeyOptions {
 
 pub fn generate_with_options(options: &KeyOptions, password: &str) -> Result<(Cert, String)> {
     use openpgp::cert::{CertBuilder, CipherSuite};
-    ensure!(
-        password.chars().count() >= 16,
-        "Private-key passphrase must have at least 16 characters"
-    );
     let name = options.name.trim();
     let email = options.email.trim();
     let comment = options.comment.trim();
@@ -194,7 +190,7 @@ pub fn generate_with_options(options: &KeyOptions, password: &str) -> Result<(Ce
         .set_primary_key_flags(primary)
         .set_validity_period(validity)
         .set_features(openpgp::types::Features::empty().set_seipdv1())?
-        .set_password(Some(password.into()))
+        .set_password((!password.is_empty()).then(|| password.into()))
         .add_userid(userid);
     if !single {
         if options.signing || options.authentication {
@@ -245,6 +241,13 @@ pub fn protected_private_armor(cert: &Cert) -> Result<Zeroizing<String>> {
             .all(|ka| ka.key().secret().is_encrypted()),
         "Private export requires all secret packets to be passphrase protected"
     );
+    private_armor(cert)
+}
+
+/// Used only for explicit private export; an empty key password means that
+/// copied secret packets have no protection beyond their destination storage.
+pub fn private_armor(cert: &Cert) -> Result<Zeroizing<String>> {
+    ensure!(cert.is_tsk(), "Selected key has no private material");
     let mut bytes = Zeroizing::new(Vec::new());
     cert.as_tsk().armored().serialize(&mut *bytes)?;
     Ok(Zeroizing::new(std::str::from_utf8(&bytes)?.to_owned()))
@@ -252,10 +255,6 @@ pub fn protected_private_armor(cert: &Cert) -> Result<Zeroizing<String>> {
 
 pub fn protect_private_key(cert: &Cert, old_password: &str, new_password: &str) -> Result<Cert> {
     ensure!(cert.is_tsk(), "Selected key has no private material");
-    ensure!(
-        new_password.chars().count() >= 16,
-        "Use at least 16 characters for the new private-key passphrase"
-    );
     let mut packets = Vec::new();
     for ka in cert.keys().secret() {
         let primary = ka.key().fingerprint() == cert.fingerprint();
@@ -265,7 +264,9 @@ pub fn protect_private_key(cert: &Cert, old_password: &str, new_password: &str) 
                 .decrypt_secret(&old_password.into())
                 .context("Could not unlock a secret key packet; check the current passphrase")?;
         }
-        key = key.encrypt_secret(&new_password.into())?;
+        if !new_password.is_empty() {
+            key = key.encrypt_secret(&new_password.into())?;
+        }
         packets.push(if primary {
             openpgp::Packet::from(key.role_into_primary())
         } else {
@@ -578,7 +579,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_weak_algorithms_past_expiry_and_unprotected_generation() {
+    fn rejects_weak_algorithms_and_past_expiry() {
         let mut settings = options("rsa1024", "single");
         assert!(generate_with_options(&settings, "disposable key passphrase").is_err());
         settings.algorithm = "dsa_elgamal".into();
@@ -586,8 +587,47 @@ mod tests {
         settings.algorithm = "rsa2048".into();
         settings.expires_at = Some(1);
         assert!(generate_with_options(&settings, "disposable key passphrase").is_err());
-        settings.expires_at = None;
-        assert!(generate_with_options(&settings, "").is_err());
+    }
+
+    #[test]
+    fn optional_and_short_key_passwords_support_crypto_and_removal() -> Result<()> {
+        for password in ["", "x"] {
+            let (cert, _) = generate_with_options(&options("cv25519", "subkeys"), password)?;
+            assert!(
+                cert.keys()
+                    .secret()
+                    .all(|ka| ka.key().secret().is_encrypted() != password.is_empty())
+            );
+            let encrypted = encrypt("optional password fixture", std::slice::from_ref(&cert))?;
+            assert_eq!(
+                decrypt(&encrypted, vec![cert.clone()], password)?
+                    .text
+                    .as_str(),
+                "optional password fixture"
+            );
+            let signed = sign("signature fixture", &cert, password)?;
+            assert_eq!(
+                verify(&signed, vec![cert.clone()])?.text.as_str(),
+                "signature fixture"
+            );
+            let short = protect_private_key(&cert, password, "a")?;
+            assert!(sign("fixture", &short, "wrong").is_err());
+            let plain = protect_private_key(&short, "a", "")?;
+            assert!(
+                plain
+                    .keys()
+                    .secret()
+                    .all(|ka| !ka.key().secret().is_encrypted())
+            );
+            sign("fixture", &plain, "")?;
+            assert_eq!(
+                decrypt(&encrypted, vec![plain.clone()], "")?.text.as_str(),
+                "optional password fixture"
+            );
+            assert!(private_armor(&plain)?.contains("BEGIN PGP PRIVATE KEY BLOCK"));
+            assert!(protected_private_armor(&plain).is_err());
+        }
+        Ok(())
     }
 
     #[test]

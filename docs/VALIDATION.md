@@ -1,5 +1,12 @@
 # Validation history
 
+## Alpha6 workflow
+
+Source is pushed before tests. New post-push checks exercise optional/one-character
+key passwords, password removal, explicit unprotected export, encrypted default
+key settings, reopening/converting both formats, and notepad-local key controls.
+Results will be recorded after those commands finish.
+
 ## Alpha5 evidence
 
 Source was pushed before tests. Debian backports Rust/Cargo 1.96.1 built the

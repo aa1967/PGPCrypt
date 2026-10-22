@@ -252,3 +252,93 @@ fn worker_dies_when_its_desktop_parent_is_killed() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn optional_key_passwords_and_default_survive_reopen_and_conversion() -> Result<()> {
+    for format in ["age", "kdbx"] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join(format!("source.{format}"));
+        let other = if format == "age" { "kdbx" } else { "age" };
+        let converted = directory.path().join(format!("copy.{other}"));
+        let password = "disposable vault conversion password";
+        let mut peer = Peer::new()?;
+        peer.ok(
+            "create",
+            json!({"path":path,"password":password,"format":format}),
+        )?;
+        peer.ok("generate",json!({"key_options":{
+            "name":"Optional password fixture","algorithm":"cv25519","layout":"subkeys",
+            "signing":true,"certification":true,"transport_encryption":true,"storage_encryption":true,"expires_at":null
+        }}))?;
+        let list = peer.ok("list", json!({}))?;
+        let fp = list["keys"][0]["fingerprint"].as_str().unwrap().to_owned();
+        assert_eq!(list["keys"][0]["secret_protected"], false);
+        assert_eq!(
+            peer.raw("settings_set", json!({"default_signing_key":"missing"}))?["ok"],
+            false
+        );
+        peer.ok("settings_set", json!({"default_signing_key":fp}))?;
+        peer.ok("settings_set", json!({"idle_timeout_seconds":120}))?;
+        assert_eq!(peer.ok("list", json!({}))?["default_signing_key"], fp);
+        peer.ok("sign", json!({"text":"passwordless signing fixture"}))?;
+        let exported = peer.ok("private_export", json!({"fingerprint":fp}))?;
+        assert_eq!(exported["protected"], false);
+        assert!(
+            pgp::parse(exported["text"].as_str().unwrap().as_bytes())?
+                .keys()
+                .secret()
+                .all(|ka| !ka.key().secret().is_encrypted())
+        );
+        assert_eq!(
+            peer.raw("protected_private_export", json!({"fingerprint":fp}))?["ok"],
+            false
+        );
+        peer.ok(
+            "protect_private_key",
+            json!({"fingerprint":fp,"new_password":"x"}),
+        )?;
+        peer.ok(
+            "sign",
+            json!({"text":"short password fixture","password":"x"}),
+        )?;
+        assert_eq!(
+            peer.raw(
+                "sign",
+                json!({"text":"wrong password fixture","password":"wrong"})
+            )?["ok"],
+            false
+        );
+        peer.ok(
+            "protect_private_key",
+            json!({"fingerprint":fp,"password":"x","new_password":""}),
+        )?;
+        peer.ok("sign", json!({"text":"removed password fixture"}))?;
+        let original = std::fs::read(&path)?;
+        peer.ok(
+            "convert_copy",
+            json!({"path":converted,"password":password,"format":other}),
+        )?;
+        assert_eq!(std::fs::read(&path)?, original);
+        peer.ok("lock", json!({}))?;
+        assert!(peer.child.wait()?.success());
+        let mut reopened = Peer::new()?;
+        assert_eq!(
+            reopened.ok("open", json!({"path":path,"password":password}))?["default_signing_key"],
+            fp
+        );
+        reopened.ok("sign", json!({"text":"reopened source fixture"}))?;
+        reopened.ok("lock", json!({}))?;
+        assert!(reopened.child.wait()?.success());
+        let mut portable = Peer::new()?;
+        let settings = portable.ok("open", json!({"path":converted,"password":password}))?;
+        assert_eq!(settings["default_signing_key"], fp);
+        assert_eq!(settings["idle_timeout_seconds"], 120);
+        portable.ok("sign", json!({"text":"converted default key fixture"}))?;
+        portable.ok("settings_set", json!({"default_signing_key":""}))?;
+        assert_eq!(
+            portable.raw("sign", json!({"text":"no default fixture"}))?["ok"],
+            false
+        );
+    }
+    Ok(())
+}

@@ -25,7 +25,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - name: Check release version
         if: startsWith(github.ref, 'refs/tags/')
-        run: test "$GITHUB_REF_NAME" = v0.1.0-alpha5
+        run: test "$GITHUB_REF_NAME" = v0.1.0-alpha6
       # These checks run on GitHub after pushing; there are no local Git hooks.
       - name: Check source
         run: |
@@ -38,7 +38,7 @@ jobs:
         run: |
           python3 tests/age_interop.py
           python3 tests/kdbx_interop.py
-          python3 scripts/check-deb.py dist/pgpcrypt_0.1.0.alpha5_amd64.deb
+          python3 scripts/check-deb.py dist/pgpcrypt_0.1.0.alpha6_amd64.deb
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: pgpcrypt-debian13-amd64
@@ -64,6 +64,6 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease \
-            --title "PGPCrypt 0.1.0 alpha5 — Debian 13 amd64" \
-            --notes-file docs/releases/0.1.0-alpha5.md \
-            dist/pgpcrypt_0.1.0.alpha5_amd64.deb dist/SHA256SUMS
+            --title "PGPCrypt 0.1.0 alpha6 — Debian 13 amd64" \
+            --notes-file docs/releases/0.1.0-alpha6.md \
+            dist/pgpcrypt_0.1.0.alpha6_amd64.deb dist/SHA256SUMS
