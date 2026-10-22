@@ -837,7 +837,7 @@ private:
                             if(!ok) return;
                             request("notes_get",{},[this](bool ok,const QJsonObject& data) {
                                 if(!ok || data.value("text").toString()!="encrypted Qt note") { fail("Notes mismatch"); return; }
-                                tabs->setCurrentIndex(0);
+                                tabs->setCurrentIndex(screenshotPath.isEmpty()?0:1);
                                 QTimer::singleShot(100,this,[this] {
                                     if(!screenshotPath.isEmpty() && !grab().save(screenshotPath)) { fail("Screenshot failed"); return; }
                                     endSession(true);

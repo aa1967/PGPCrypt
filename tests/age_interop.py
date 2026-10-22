@@ -109,7 +109,22 @@ def main():
         assert peer.request("notes_get")["text"] == decoded["data"]["notes"]
         assert peer.request("list")["keys"][0]["fingerprint"] == fingerprint
         peer.lock()
-    print("age interoperability passed: Rust vault -> Debian age -> Rust vault")
+        # Recreate the previous age schemas using the independent writer.
+        for schema in (2, 1):
+            decoded["schema"] = schema
+            decoded["data"].pop("default_signing_key", None)
+            if schema == 1:
+                decoded["data"].pop("revocations", None)
+                decoded["data"].pop("idle_timeout_seconds", None)
+            plaintext.write_text(json.dumps(decoded))
+            previous = directory / ("schema-" + str(schema) + ".age")
+            terminal_command([age, "--passphrase", "--output", str(previous), str(plaintext)])
+            peer = Peer()
+            settings = peer.request("open", path=str(previous), password=PASS)
+            assert settings["default_signing_key"] == ""
+            assert peer.request("list")["keys"][0]["fingerprint"] == fingerprint
+            peer.lock()
+    print("age interoperability passed: Rust vault -> Debian age -> Rust vault; schemas 1/2/3")
 
 
 if __name__ == "__main__":

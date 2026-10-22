@@ -453,6 +453,17 @@ mod tests {
             .unwrap();
         assert!(entry.fields["OpenPGP.PrivateKey"].is_protected());
         assert!(entry.fields["OpenPGP.Revocation"].is_protected());
+        // Earlier PGPCrypt KDBX settings lack the default-key field.
+        let mut old_db = db.clone();
+        old_db.foreach_entry_mut(|mut entry| {
+            if entry.get(MARKER) == Some("settings") {
+                entry.set_unprotected(SCHEMA, "1");
+                entry.fields.remove("PGPCrypt.DefaultSigningKey");
+            }
+        });
+        let mut old_snapshot = Vec::new();
+        old_db.save(&mut old_snapshot, DatabaseKey::new().with_password(PASS))?;
+        assert!(open(&old_snapshot, PASS)?.0.default_signing_key.is_empty());
         let mut root = db.root_mut();
         let mut unrelated = root.add_entry();
         unrelated.set_unprotected("Title", "Unrelated entry");

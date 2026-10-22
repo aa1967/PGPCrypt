@@ -1,11 +1,21 @@
 # Validation history
 
-## Alpha6 workflow
+## Alpha6 evidence
 
-Source is pushed before tests. New post-push checks exercise optional/one-character
-key passwords, password removal, explicit unprotected export, encrypted default
-key settings, reopening/converting both formats, and notepad-local key controls.
-Results will be recorded after those commands finish.
+Functional source at `ee740b8` was pushed before tests. All 22 Rust tests passed
+(17 core, 1 GnuPG interoperability, 4 worker/lifecycle), as did independent age
+and Debian KeePassXC 2.7.10 interoperability. New checks covered passwordless
+and one-character key passwords, adding/removing key protection, wrong-password
+rejection, explicit unprotected export, default signing key validation and
+persistence through reopening and conversions in both directions.
+
+The `.deb` passed packaged Qt workflows for age with a one-character key password
+and KDBX with no key password: recipients/signing controls were on Notepad,
+saved defaults were restored, recipient checks survived refresh, and crypto,
+notes and lock/restart passed. ELF/runtime/path/permission checks passed without
+installing system files. Formatting, Clippy and C++ warnings-as-errors passed.
+A follow-up adds previous-schema compatibility cases and a Notepad screenshot
+probe, run only after that source push.
 
 ## Alpha5 evidence
 
