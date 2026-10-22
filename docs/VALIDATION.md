@@ -14,8 +14,10 @@ and KDBX with no key password: recipients/signing controls were on Notepad,
 saved defaults were restored, recipient checks survived refresh, and crypto,
 notes and lock/restart passed. ELF/runtime/path/permission checks passed without
 installing system files. Formatting, Clippy and C++ warnings-as-errors passed.
-A follow-up adds previous-schema compatibility cases and a Notepad screenshot
-probe, run only after that source push.
+Follow-up source `c769c28` passed previous KDBX settings-schema compatibility
+and independent age schema-1/2/3 reopening checks. Its KDBX Notepad workflow
+passed again with a screenshot: all recipient/signing/default/password/action
+controls fit on the Notepad page. These follow-up checks also ran after pushing.
 
 ## Alpha5 evidence
 
