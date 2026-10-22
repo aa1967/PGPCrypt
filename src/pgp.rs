@@ -400,6 +400,7 @@ pub fn add_subkey(
         "Choose a subkey expiry within the primary key lifetime"
     );
     let result = KeyBuilder::new(flags)
+        .set_creation_time(SystemTime::now())
         .set_cipher_suite(suite)
         .set_password((!subkey_password.is_empty()).then(|| subkey_password.into()))
         .subkey(valid)?

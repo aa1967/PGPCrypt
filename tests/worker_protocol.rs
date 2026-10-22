@@ -395,7 +395,7 @@ fn preferences_subkeys_and_password_requests_roundtrip() -> Result<()> {
             json!({"fingerprint":fp,"password":"x","subkey_options":options,"new_password":"y"}),
         )?;
         let missing = peer.raw("sign", json!({"fingerprint":fp,"text":"prompt fixture"}))?;
-        assert_eq!(missing["code"], "password_required");
+        assert_eq!(missing["code"], "password_required", "{missing}");
         peer.ok(
             "sign",
             json!({"fingerprint":fp,"password":"y","text":"new signing subkey fixture"}),
