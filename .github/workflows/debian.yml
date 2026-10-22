@@ -33,7 +33,7 @@ jobs:
       - name: Check package and age interoperability
         run: |
           python3 tests/age_interop.py
-          python3 scripts/check-deb.py dist/pgpcrypt_0.1.0~alpha3_amd64.deb
+          python3 scripts/check-deb.py dist/pgpcrypt_0.1.0.alpha3_amd64.deb
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: pgpcrypt-debian13-amd64
@@ -61,4 +61,4 @@ jobs:
             --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease \
             --title "PGPCrypt 0.1.0 alpha3 — Debian 13 amd64" \
             --notes-file docs/releases/0.1.0-alpha3.md \
-            dist/pgpcrypt_0.1.0~alpha3_amd64.deb dist/SHA256SUMS
+            dist/pgpcrypt_0.1.0.alpha3_amd64.deb dist/SHA256SUMS

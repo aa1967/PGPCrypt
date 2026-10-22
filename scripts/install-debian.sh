@@ -33,7 +33,8 @@ if [ "$1" = --build ]; then
     cd "$repo_root"
     ./scripts/build-deb.sh
     package_version=${PGPCRYPT_PACKAGE_VERSION:-0.1.0~alpha3}
-    archive="$repo_root/dist/pgpcrypt_${package_version}_$(dpkg --print-architecture).deb"
+    filename_version=$(printf '%s' "$package_version" | tr '~' '.')
+    archive="$repo_root/dist/pgpcrypt_${filename_version}_$(dpkg --print-architecture).deb"
 else
     archive=$(realpath -- "$2")
     test -f "$archive"

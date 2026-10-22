@@ -12,10 +12,10 @@ Download and install from the command line, or get the files from
 sudo apt update
 sudo apt install -y curl ca-certificates
 cd ~/Downloads
-curl --fail --location --remote-name https://github.com/aa1967/PGPCrypt/releases/download/v0.1.0-alpha3/pgpcrypt_0.1.0~alpha3_amd64.deb
+curl --fail --location --remote-name https://github.com/aa1967/PGPCrypt/releases/download/v0.1.0-alpha3/pgpcrypt_0.1.0.alpha3_amd64.deb
 curl --fail --location --remote-name https://github.com/aa1967/PGPCrypt/releases/download/v0.1.0-alpha3/SHA256SUMS
 sha256sum --check SHA256SUMS
-sudo apt install ./pgpcrypt_0.1.0~alpha3_amd64.deb
+sudo apt install ./pgpcrypt_0.1.0.alpha3_amd64.deb
 pgpcrypt
 ```
 

@@ -5,7 +5,7 @@
 ```sh
 cd ~/Downloads
 sudo apt update
-sudo apt install ./pgpcrypt_0.1.0~alpha3_amd64.deb
+sudo apt install ./pgpcrypt_0.1.0.alpha3_amd64.deb
 pgpcrypt
 ```
 
@@ -34,7 +34,7 @@ To build without installing:
 
 ```sh
 ./scripts/build-deb.sh
-python3 scripts/check-deb.py dist/pgpcrypt_0.1.0~alpha3_amd64.deb
+python3 scripts/check-deb.py dist/pgpcrypt_0.1.0.alpha3_amd64.deb
 ```
 
 ## Reproducibility and validation limits

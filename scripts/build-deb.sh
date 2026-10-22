@@ -6,6 +6,9 @@ cd "$repo_root"
 ./scripts/dev.sh build --release --locked --features legacy-migration --bin pgpcrypt-migrate -j 4
 package_version=${PGPCRYPT_PACKAGE_VERSION:-0.1.0~alpha3}
 dpkg --validate-version "$package_version"
+# GitHub release uploads normalize '~' to '.', so choose that filename before
+# computing checksums. Debian's internal Version retains prerelease ordering.
+filename_version=$(printf '%s' "$package_version" | tr '~' '.')
 package_arch=$(dpkg --print-architecture)
 stage=$(mktemp -d "$repo_root/target/package.XXXXXX")
 trap 'rm -rf "$stage"' EXIT HUP INT TERM
@@ -75,7 +78,7 @@ Description: Experimental encrypted OpenPGP vault and desktop text workspace
  Standard age v1 vault encryption; application alpha for local evaluation.
 EOF
 mkdir -p dist
-archive="$repo_root/dist/pgpcrypt_${package_version}_${package_arch}.deb"
+archive="$repo_root/dist/pgpcrypt_${filename_version}_${package_arch}.deb"
 dpkg-deb --root-owner-group --build "$stage" "$archive"
-(cd dist && sha256sum "pgpcrypt_${package_version}_${package_arch}.deb" > SHA256SUMS)
+(cd dist && sha256sum "pgpcrypt_${filename_version}_${package_arch}.deb" > SHA256SUMS)
 printf '%s\n' "$archive"
