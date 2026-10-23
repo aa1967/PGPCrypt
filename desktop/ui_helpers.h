@@ -15,6 +15,7 @@
 #include <QLabel>
 #include <QMenu>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QScrollBar>
 #include <QStringList>
 #include <QTableWidget>
@@ -222,17 +223,18 @@ inline QDialog* showVerificationDialog(QWidget* parent, bool passed,
         QObject::connect(comparison, &QWidget::customContextMenuRequested, dialog, [comparison](const QPoint& point) {
             auto* item = comparison->itemAt(point);
             if (!item) return;
+            const auto copiedValue = item->text();
+            QStringList copiedRows;
+            for (int index = 0; index < comparison->rowCount(); ++index)
+                copiedRows.append(comparison->verticalHeaderItem(index)->text() + "\t" + comparison->item(index, 0)->text() + "\t" + comparison->item(index, 1)->text());
+            QPointer<QTableWidget> guardedComparison(comparison);
             QMenu menu;
             auto* copyValue = menu.addAction("Copy value");
             auto* copyBoth = menu.addAction("Copy both columns");
             const auto selected = menu.exec(comparison->viewport()->mapToGlobal(point));
-            if (selected == copyValue) QApplication::clipboard()->setText(item->text());
-            else if (selected == copyBoth) {
-                QStringList lines;
-                for (int index = 0; index < comparison->rowCount(); ++index)
-                    lines.append(comparison->verticalHeaderItem(index)->text() + "\t" + comparison->item(index, 0)->text() + "\t" + comparison->item(index, 1)->text());
-                QApplication::clipboard()->setText(lines.join("\n"));
-            }
+            if (!guardedComparison || !guardedComparison->isVisible()) return;
+            if (selected == copyValue) QApplication::clipboard()->setText(copiedValue);
+            else if (selected == copyBoth) QApplication::clipboard()->setText(copiedRows.join("\n"));
         });
         layout->addWidget(comparison, 1);
         auto* match = new QLabel(everyStoredMatch ? "Full fingerprints match the corresponding stored certificates."
