@@ -3,7 +3,7 @@
 //! explicit UI action, with disclosure of any unprotected secret packets.
 use crate::{
     pgp,
-    vault::{Document, Profile, RevocationTicket, Vault, VaultData, VaultFormat, workspace_id},
+    vault::{Profile, RevocationTicket, Vault, VaultData, VaultFormat, workspace_id},
 };
 use anyhow::{Context, Result, bail, ensure};
 use sequoia_openpgp::cert::amalgamation::ValidAmalgamation;
@@ -35,6 +35,10 @@ pub struct Request {
     #[serde(default)]
     pub new_password: String,
     #[serde(default)]
+    pub vault_password: String,
+    #[serde(default)]
+    pub protection_option: String,
+    #[serde(default)]
     pub text: String,
     #[serde(default)]
     pub fingerprint: String,
@@ -55,6 +59,14 @@ pub struct Request {
     #[serde(default)]
     pub profile_name: String,
     #[serde(default)]
+    pub profile_username: Option<String>,
+    #[serde(default)]
+    pub profile_email: Option<String>,
+    #[serde(default)]
+    pub profile_url: Option<String>,
+    #[serde(default)]
+    pub profile_notes: Option<String>,
+    #[serde(default)]
     pub profile_fingerprints: Vec<String>,
     #[serde(default)]
     pub document_id: String,
@@ -65,6 +77,15 @@ pub struct Request {
     #[serde(default)]
     pub expiry_unit: String,
 }
+
+#[derive(Debug)]
+struct VaultAuthRequired;
+impl std::fmt::Display for VaultAuthRequired {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.write_str("Confirm the vault password/passphrase before exporting unprotected private key packets")
+    }
+}
+impl std::error::Error for VaultAuthRequired {}
 
 #[derive(Default)]
 pub struct Session {
@@ -212,7 +233,7 @@ impl Session {
                     && !self.vault()?.is_read_only()
                     && self.vault()?.record_normal_open(Self::unix_now()).is_err()
                 {
-                    "Inactivity protection could not be refreshed. Check Settings before relying on its deadline."
+                    "Inactivity protection could not be refreshed. Check Vault settings before relying on its deadline."
                 } else {
                     ""
                 };
@@ -232,7 +253,22 @@ impl Session {
                 Ok(status) => Ok(serde_json::to_value(status)?),
                 Err(_) => Ok(json!({"configured":true,"armed":false,"unavailable":true})),
             },
-            "protection_status" => Ok(json!({"enabled":self.vault()?.protection_enabled()?})),
+            "protection_status" => {
+                let options = self.vault()?.protection_options()?;
+                Ok(json!({"enabled":self.vault()?.protection_enabled()?,
+                    "dummy_enabled":options.dummy,"emergency_enabled":options.emergency,"expiry_enabled":options.expiry}))
+            }
+            "protection_option_enable" | "protection_option_disable" => {
+                let kind = match request.protection_option.as_str() {
+                    "dummy" => crate::protection::OptionKind::Dummy,
+                    "emergency" => crate::protection::OptionKind::Emergency,
+                    "expiry" => crate::protection::OptionKind::Expiry,
+                    _ => bail!("Choose a vault protection option"),
+                };
+                self.vault()?
+                    .protection_set_option(kind, request.op == "protection_option_enable")?;
+                Ok(json!({"saved":true}))
+            }
             "protection_enable" => {
                 self.vault()?.protection_enable()?;
                 Ok(json!({"enabled":true}))
@@ -305,6 +341,7 @@ impl Session {
                         "primary_secret_protected":cert.primary_key().key().optional_secret().is_some_and(|s|s.is_encrypted()),
                         "signing_password_required":cert.keys().secret().with_policy(&policy,None).supported().alive().revoked(false).for_signing().all(|ka|ka.key().secret().is_encrypted()),
                         "algorithm":cert.primary_key().key().pk_algo().to_string(),
+                        "created_at":cert.primary_key().key().creation_time().duration_since(UNIX_EPOCH).map(|d|d.as_secs()).unwrap_or(0),
                         "expires_at":cert.with_policy(&policy,None).ok().and_then(|c| c.primary_key().key_expiration_time()).and_then(|t|t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d|d.as_secs()),
                         "capabilities":cert.keys().with_policy(&policy,None).supported().filter_map(|ka|ka.key_flags()).map(|f|format!("{f:?}")).collect::<Vec<_>>(),
                         "can_encrypt":status == "Valid" && cert.keys().with_policy(&policy,None).supported().alive().revoked(false).any(|ka|ka.key_flags().is_some_and(|flags| flags.for_transport_encryption() || flags.for_storage_encryption())),
@@ -322,9 +359,23 @@ impl Session {
                     request.profile_id.clone()
                 };
                 self.change_workspace(|data| {
+                    let previous = data.profiles.iter().find(|profile| profile.id == id);
                     let profile = Profile {
                         id: id.clone(),
                         name: request.profile_name.trim().to_owned(),
+                        username: request.profile_username.clone().unwrap_or_else(|| {
+                            previous.map(|p| p.username.clone()).unwrap_or_default()
+                        }),
+                        email: request.profile_email.clone().unwrap_or_else(|| {
+                            previous.map(|p| p.email.clone()).unwrap_or_default()
+                        }),
+                        url: request
+                            .profile_url
+                            .clone()
+                            .unwrap_or_else(|| previous.map(|p| p.url.clone()).unwrap_or_default()),
+                        notes: request.profile_notes.clone().unwrap_or_else(|| {
+                            previous.map(|p| p.notes.clone()).unwrap_or_default()
+                        }),
                         fingerprints: request.profile_fingerprints.clone(),
                     };
                     if request.profile_id.is_empty() {
@@ -343,20 +394,7 @@ impl Session {
             }
             "profile_delete" => {
                 ensure!(!request.profile_id.is_empty(), "All cannot be deleted");
-                self.change_workspace(|data| {
-                    let index = data
-                        .profiles
-                        .iter()
-                        .position(|profile| profile.id == request.profile_id)
-                        .context("Profile no longer exists")?;
-                    data.profiles.remove(index);
-                    for document in &mut data.documents {
-                        if document.profile_id == request.profile_id {
-                            document.profile_id.clear();
-                        }
-                    }
-                    Ok(())
-                })?;
+                self.change_workspace(|data| data.remove_profile(&request.profile_id))?;
                 Ok(json!({"saved":true}))
             }
             "documents_list" => {
@@ -388,37 +426,25 @@ impl Session {
                     json!({"id":document.id,"title":document.title,"text":document.text,"profile_id":document.profile_id,"created_at":document.created_at,"updated_at":document.updated_at}),
                 )
             }
-            "document_save" => {
-                let id = if request.document_id.is_empty() {
-                    workspace_id()?
-                } else {
-                    request.document_id.clone()
-                };
-                let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-                self.change_workspace(|data| {
-                    if request.document_id.is_empty() {
-                        data.documents.push(Document {
-                            id: id.clone(),
-                            title: request.title.trim().to_owned(),
-                            text: request.text.clone(),
-                            profile_id: request.profile_id.clone(),
-                            created_at: now,
-                            updated_at: now,
-                        });
-                    } else {
-                        let document = data
-                            .documents
-                            .iter_mut()
-                            .find(|document| document.id == id)
-                            .context("Document no longer exists")?;
-                        document.title = request.title.trim().to_owned();
-                        document.text = request.text.clone();
-                        document.profile_id = request.profile_id.clone();
-                        document.updated_at = now.max(document.created_at);
-                    }
-                    Ok(())
+            "document_save" | "document_properties" => {
+                ensure!(
+                    request.op != "document_properties" || !request.document_id.is_empty(),
+                    "Choose a saved document"
+                );
+                let now = Self::unix_now();
+                let document = self.change_workspace(|data| {
+                    data.save_document(
+                        &request.document_id,
+                        &request.title,
+                        &request.profile_id,
+                        (request.op == "document_save").then_some(request.text.as_str()),
+                        now,
+                    )
                 })?;
-                Ok(json!({"saved":true,"id":id}))
+                Ok(
+                    json!({"saved":true,"id":document.id,"title":document.title,"profile_id":document.profile_id,
+                    "created_at":document.created_at,"updated_at":document.updated_at}),
+                )
             }
             "document_delete" => {
                 self.change_workspace(|data| {
@@ -470,14 +496,6 @@ impl Session {
                     .context("Select a key")?;
                 Ok(json!({"text":pgp::public_armor(&cert)?}))
             }
-            "protected_private_export" => {
-                let cert = self
-                    .certs()?
-                    .into_iter()
-                    .find(|c| c.fingerprint().to_hex() == request.fingerprint)
-                    .context("Select a private key")?;
-                Ok(json!({"text":pgp::protected_private_armor(&cert)?.as_str()}))
-            }
             "subkeys" => {
                 let cert = self
                     .certs()?
@@ -511,14 +529,28 @@ impl Session {
                 self.store(updated, "")?;
                 Ok(json!({"saved":true}))
             }
-            "private_export" => {
+            "private_export" | "protected_private_export" => {
                 let cert = self
                     .certs()?
                     .into_iter()
                     .find(|c| c.fingerprint().to_hex() == request.fingerprint)
                     .context("Select a private key")?;
+                ensure!(cert.is_tsk(), "This certificate has no private key packets");
+                let protected = cert
+                    .keys()
+                    .secret()
+                    .all(|ka| ka.key().secret().is_encrypted());
+                if request.op == "protected_private_export" {
+                    ensure!(
+                        protected,
+                        "Some private key packets are unprotected; use explicit private export"
+                    );
+                }
+                if !protected && !self.vault()?.authenticate_password(&request.vault_password) {
+                    return Err(VaultAuthRequired.into());
+                }
                 Ok(
-                    json!({"text":pgp::private_armor(&cert)?.as_str(),"protected":cert.keys().secret().all(|ka|ka.key().secret().is_encrypted())}),
+                    json!({"text":pgp::authenticated_private_armor(&cert,&request.password)?.as_str(),"protected":protected}),
                 )
             }
             "protect_private_key" => {
@@ -744,6 +776,8 @@ pub fn run(mut input: impl BufRead, mut output: impl Write) -> Result<()> {
                     .any(|cause| cause.is::<pgp::PasswordRequired>())
                 {
                     "password_required"
+                } else if error.chain().any(|cause| cause.is::<VaultAuthRequired>()) {
+                    "vault_auth_required"
                 } else {
                     "operation_failed"
                 };

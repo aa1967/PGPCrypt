@@ -86,6 +86,14 @@ pub struct Profile {
     pub id: String,
     pub name: String,
     pub fingerprints: Vec<String>,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub email: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub notes: String,
 }
 
 #[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
@@ -113,7 +121,16 @@ fn valid_workspace_id(id: &str) -> bool {
 }
 
 fn valid_label(label: &str, max: usize) -> bool {
-    !label.trim().is_empty() && label.chars().count() <= max && !label.chars().any(char::is_control)
+    !label.trim().is_empty()
+        && label.chars().count() <= max
+        && portable_text(label)
+        && !label.chars().any(char::is_control)
+}
+
+fn portable_text(text: &str) -> bool {
+    text.chars().all(|c| {
+        matches!(c, '\t' | '\n' | '\r') || (c >= ' ' && c != '\u{fffe}' && c != '\u{ffff}')
+    })
 }
 
 #[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
@@ -155,6 +172,128 @@ impl Default for VaultData {
 }
 
 impl VaultData {
+    /// Create or update a saved document by stable ID. A missing text value
+    /// changes properties only; it can never replace content with an empty string.
+    /// Names are unique within each profile and never identify a document.
+    pub fn save_document(
+        &mut self,
+        id: &str,
+        title: &str,
+        profile_id: &str,
+        text: Option<&str>,
+        now: u64,
+    ) -> Result<Document> {
+        ensure!(
+            profile_id.is_empty() || self.profiles.iter().any(|p| p.id == profile_id),
+            "Profile no longer exists"
+        );
+        let existing = if id.is_empty() {
+            ensure!(text.is_some(), "A new document needs content");
+            ensure!(
+                self.documents.len() < 1024,
+                "A vault supports at most 1024 documents"
+            );
+            None
+        } else {
+            Some(
+                self.documents
+                    .iter()
+                    .position(|d| d.id == id)
+                    .context("Document no longer exists")?,
+            )
+        };
+        let title = self.available_document_title(title, profile_id, id)?;
+        let mut document = if let Some(index) = existing {
+            self.documents[index].clone()
+        } else {
+            Document {
+                id: workspace_id()?,
+                title: String::new(),
+                text: String::new(),
+                profile_id: String::new(),
+                created_at: now.max(1),
+                updated_at: now.max(1),
+            }
+        };
+        document.title = title;
+        document.profile_id = profile_id.to_owned();
+        if let Some(text) = text {
+            ensure!(text.len() <= 4 * 1024 * 1024, "Document exceeds 4 MiB");
+            ensure!(
+                portable_text(text),
+                "Document contains control characters unsupported by portable KDBX text"
+            );
+            document.text = text.to_owned();
+        }
+        document.updated_at = now.max(document.created_at);
+        if let Some(index) = existing {
+            self.documents[index] = document.clone();
+        } else {
+            self.documents.push(document.clone());
+        }
+        Ok(document)
+    }
+
+    pub fn available_document_title(
+        &self,
+        title: &str,
+        profile_id: &str,
+        exclude_id: &str,
+    ) -> Result<String> {
+        let requested = title.trim();
+        let base = if requested.is_empty() {
+            "untitled"
+        } else {
+            requested
+        };
+        ensure!(
+            valid_label(base, 120),
+            "Document titles must contain at most 120 characters without control characters"
+        );
+        let available = |candidate: &str| {
+            !self.documents.iter().any(|d| {
+                d.id != exclude_id
+                    && d.profile_id == profile_id
+                    && d.title.to_lowercase() == candidate.to_lowercase()
+            })
+        };
+        if available(base) {
+            return Ok(base.to_owned());
+        }
+        for number in 1..=1024 {
+            let suffix = format!(" ({number})");
+            let prefix: String = base.chars().take(120 - suffix.chars().count()).collect();
+            let candidate = format!("{prefix}{suffix}");
+            if available(&candidate) {
+                return Ok(candidate);
+            }
+        }
+        bail!("No available document title")
+    }
+
+    /// Deleting a profile retains its documents. Resolve titles while moving
+    /// them into the unassigned collection rather than silently replacing one.
+    pub fn remove_profile(&mut self, id: &str) -> Result<()> {
+        let index = self
+            .profiles
+            .iter()
+            .position(|p| p.id == id)
+            .context("Profile no longer exists")?;
+        self.profiles.remove(index);
+        for index in 0..self.documents.len() {
+            if self.documents[index].profile_id == id {
+                let title = self.available_document_title(
+                    &self.documents[index].title,
+                    "",
+                    &self.documents[index].id,
+                )?;
+                self.documents[index].title = title;
+                self.documents[index].profile_id.clear();
+            }
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<()> {
         self.preferences.validate()?;
         ensure!(
@@ -196,6 +335,19 @@ impl VaultData {
                     .all(|fp| fingerprints.contains(fp) && members.insert(fp)),
                 "Profile contains a missing or duplicate key"
             );
+            ensure!(
+                profile.username.chars().count() <= 256
+                    && profile.email.chars().count() <= 256
+                    && profile.url.chars().count() <= 2048
+                    && [&profile.username, &profile.email, &profile.url]
+                        .iter()
+                        .all(|field| portable_text(field) && !field.chars().any(char::is_control)),
+                "Identity username/email support 256 characters and website 2048, without control characters"
+            );
+            ensure!(
+                profile.notes.len() <= 16 * 1024 && portable_text(&profile.notes),
+                "Identity notes support at most 16 KiB of portable text"
+            );
         }
         let mut document_ids = HashSet::new();
         let mut text_bytes = 0usize;
@@ -213,11 +365,7 @@ impl VaultData {
                 "Document exceeds 4 MiB"
             );
             ensure!(
-                document
-                    .text
-                    .chars()
-                    .all(|c| matches!(c, '\t' | '\n' | '\r')
-                        || (c >= ' ' && c != '\u{fffe}' && c != '\u{ffff}')),
+                portable_text(&document.text),
                 "Document contains control characters unsupported by portable KDBX text"
             );
             ensure!(
@@ -368,10 +516,7 @@ impl Vault {
         format: VaultFormat,
         data: VaultData,
     ) -> Result<Self> {
-        ensure!(
-            password.chars().count() >= 16,
-            "Use at least 16 characters; prefer randomly chosen words"
-        );
+        crate::password::validate_new_password(password)?;
         let path = resolve(path)?;
         for record in [
             crate::protection::sidecar_path(&path),
@@ -487,7 +632,7 @@ impl Vault {
         // No decoded data is exposed until the complete age stream authenticates.
         let stored: Stored = serde_json::from_slice(&plaintext).context("Invalid vault schema")?;
         ensure!(
-            stored.application == "PGPCrypt" && matches!(stored.schema, 1..=5),
+            stored.application == "PGPCrypt" && matches!(stored.schema, 1..=6),
             "Unsupported vault schema"
         );
         ensure!(
@@ -547,8 +692,31 @@ impl Vault {
         self.read_only
     }
 
+    /// Authenticate against the already unlocked vault credential without a
+    /// second decryption or returning that credential through worker IPC.
+    pub fn authenticate_password(&self, password: &str) -> bool {
+        use age::secrecy::ExposeSecret;
+        crate::password::matches(password, self.passphrase.expose_secret())
+    }
+
     pub fn protection_enabled(&self) -> Result<bool> {
         crate::protection::enabled(&self.path)
+    }
+
+    pub fn protection_options(&self) -> Result<crate::protection::Options> {
+        crate::protection::options(&self.path)
+    }
+
+    pub fn protection_set_option(
+        &self,
+        kind: crate::protection::OptionKind,
+        enabled: bool,
+    ) -> Result<()> {
+        ensure!(!self.read_only, "Vault is read-only");
+        if enabled {
+            self.check_unchanged()?;
+        }
+        crate::protection::set_option(&self.path, kind, enabled)
     }
 
     pub fn protection_enable(&self) -> Result<()> {
@@ -599,13 +767,14 @@ impl Vault {
     pub fn emergency_configure(&self, password: &str) -> Result<()> {
         use age::secrecy::ExposeSecret;
         ensure!(!self.read_only, "Vault is read-only");
+        crate::password::validate_new_password(password)?;
         ensure!(
-            password != self.passphrase.expose_secret(),
+            !crate::password::matches(password, self.passphrase.expose_secret()),
             "Choose an emergency password different from the vault password"
         );
         self.check_unchanged()?;
         ensure!(
-            !crate::duress::dummy_matches(&self.path, password)?,
+            !crate::duress::dummy_password_matches_configured(&self.path, password)?,
             "Choose different emergency and dummy passwords"
         );
         crate::duress::configure(&self.path, &self.encrypted_snapshot.borrow(), password)
@@ -623,13 +792,14 @@ impl Vault {
     pub fn dummy_configure(&self, password: &str) -> Result<()> {
         use age::secrecy::ExposeSecret;
         ensure!(!self.read_only, "Vault is read-only");
+        crate::password::validate_new_password(password)?;
         ensure!(
-            password != self.passphrase.expose_secret(),
+            !crate::password::matches(password, self.passphrase.expose_secret()),
             "Choose a dummy password different from the vault password"
         );
         self.check_unchanged()?;
         ensure!(
-            !crate::duress::emergency_matches(&self.path, password)?,
+            !crate::duress::emergency_password_matches_configured(&self.path, password)?,
             "Choose different emergency and dummy passwords"
         );
         crate::duress::dummy_configure(&self.path, &self.encrypted_snapshot.borrow(), password)
@@ -688,7 +858,7 @@ impl Vault {
         }
         let mut plaintext = Zeroizing::new(serde_json::to_vec(&StoredRef {
             application: "PGPCrypt",
-            schema: 5,
+            schema: 6,
             data: &self.data,
         })?);
         let size = plaintext.len().div_ceil(PAD) * PAD;
@@ -818,7 +988,11 @@ mod tests {
     fn creation_and_path_guards() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("vault");
-        assert!(Vault::create(&path, "short").is_err());
+        for (name, password) in [("short", "x"), ("empty", "")] {
+            drop(Vault::create(&dir.path().join(name), password)?);
+            assert!(Vault::open(&dir.path().join(name), password).is_ok());
+        }
+        assert!(Vault::create(&path, &"x".repeat(129)).is_err());
         let vault = Vault::create(&path, PASS)?;
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
@@ -953,6 +1127,103 @@ mod conversion_tests {
         assert_eq!(restored.data.revocations[0].armor, ticket);
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(fs::metadata(kdbx)?.permissions().mode() & 0o777, 0o600);
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod workspace_property_tests {
+    use super::*;
+
+    fn identity(id: &str, name: &str) -> Profile {
+        Profile {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            fingerprints: Vec::new(),
+            username: "A private alias".into(),
+            email: "alias@example.invalid".into(),
+            url: "https://example.invalid/profile".into(),
+            notes: "Identity notes\nKeep private".into(),
+        }
+    }
+
+    #[test]
+    fn document_names_properties_and_profile_deletion_preserve_content() -> Result<()> {
+        let mut data = VaultData::default();
+        let profile_id = workspace_id()?;
+        data.profiles
+            .push(identity(&profile_id, "Private identity"));
+        let first = data.save_document("", "", "", Some("first content"), 10)?;
+        let second = data.save_document("", "", "", Some("second content"), 11)?;
+        assert_eq!(first.title, "untitled");
+        assert_eq!(second.title, "untitled (1)");
+        let profiled =
+            data.save_document("", "UNTITLED", &profile_id, Some("profile content"), 12)?;
+        assert_eq!(profiled.title, "UNTITLED");
+        let moved = data.save_document(&profiled.id, "untitled", "", None, 13)?;
+        assert_eq!(moved.title, "untitled (2)");
+        assert_eq!(moved.text, "profile content");
+        assert_eq!(moved.created_at, 12);
+        assert_eq!(moved.updated_at, 13);
+        let renamed = data.save_document(&first.id, "untitled", "", None, 14)?;
+        assert_eq!(
+            renamed.title, "untitled",
+            "the current document does not collide with itself"
+        );
+        let extra = data.save_document("", "untitled", &profile_id, Some("retained"), 15)?;
+        data.remove_profile(&profile_id)?;
+        let retained = data.documents.iter().find(|d| d.id == extra.id).unwrap();
+        assert_eq!(retained.title, "untitled (3)");
+        assert!(retained.profile_id.is_empty());
+        assert_eq!(retained.text, "retained");
+        assert_eq!(data.documents.len(), 4);
+        data.validate()?;
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_document_properties_do_not_mutate_content() -> Result<()> {
+        let mut data = VaultData::default();
+        let doc = data.save_document("", "Test", "", Some("original content"), 10)?;
+        for (title, profile, text) in [
+            ("Invalid\0title", "", None),
+            ("Changed", "missing-profile", None),
+            ("Changed", "", Some("bad\0text")),
+        ] {
+            assert!(
+                data.save_document(&doc.id, title, profile, text, 11)
+                    .is_err()
+            );
+            assert_eq!(data.documents[0].title, "Test");
+            assert_eq!(data.documents[0].text, "original content");
+        }
+        assert!(data.save_document("", "New", "", None, 11).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn identity_metadata_survives_both_container_formats() -> Result<()> {
+        for format in [VaultFormat::Age, VaultFormat::Kdbx] {
+            let dir = tempfile::tempdir()?;
+            let path = dir.path().join("identity-vault");
+            let mut vault = Vault::create_format(&path, "x", format)?;
+            let id = workspace_id()?;
+            vault.data.profiles.push(identity(&id, "Private identity"));
+            vault.save()?;
+            drop(vault);
+            let loaded = Vault::open(&path, "x")?;
+            assert_eq!(loaded.data.profiles[0].id, id);
+            assert_eq!(loaded.data.profiles[0].username, "A private alias");
+            assert_eq!(loaded.data.profiles[0].email, "alias@example.invalid");
+            assert_eq!(
+                loaded.data.profiles[0].url,
+                "https://example.invalid/profile"
+            );
+            assert_eq!(
+                loaded.data.profiles[0].notes,
+                "Identity notes\nKeep private"
+            );
+        }
         Ok(())
     }
 }

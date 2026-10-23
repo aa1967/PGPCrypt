@@ -8,10 +8,11 @@ recovery password.** Configure it only after understanding the limits below.
 
 ## Configure and disable
 
-Unlock normally, enable the master control in **Settings → Password and vault
-protection**, accept its warning, then open **Emergency destruction password**, enter and
-confirm a distinct password of at least 16 characters, and accept the destructive
-opt-in. Use the disable action to remove the trigger. The normal vault password
+Unlock normally, enable the master control in **Vault settings → Password and vault
+protection**, accept its warning, then check **Emergency destruction password**, enter and
+confirm a distinct password (up to 128 characters), and accept the destructive
+opt-in. No minimum is enforced; use the strength indicator as guidance. Uncheck
+the option or master to erase its configuration. Re-enabling requires fresh setup. The normal vault password
 or dummy password cannot be used as the emergency password. No real vault is destroyed by enabling
 the option; destruction happens only if the emergency password is later entered
 at unlock.
@@ -26,8 +27,8 @@ password. Do not assume the feature itself is hidden.
 
 PGPCrypt updates the binding after its own saves. An outside edit, mismatched
 record, unsafe file path or missing companion prevents triggering. KeePassXC
-saves therefore disarm it until configured again after normal unlock. Check the
-status in Settings after moving or externally editing the vault. A conversion
+saves therefore disarm it until configured again after normal unlock. Reconfigure the
+option after moving or externally editing the vault. A conversion
 does not arm the new destination; configure that copy separately if desired.
 Other software, including KeePassXC and the age command, does not recognize the
 emergency password. Do not rely on it when the companion file is absent.

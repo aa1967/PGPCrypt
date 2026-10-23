@@ -1,9 +1,13 @@
 # Password and vault protection
 
-These optional features are **off by default**. Unlock normally, select Settings,
+These optional features are **off by default**. Unlock normally, select Vault settings,
 then enable the master control in **Password and vault protection** and accept
 its warning. Enabling the master alone does not configure any individual option.
-Disabling it disarms all three options and removes their companion records.
+Each option has its own checkbox. Checking it permits setup; saving a new
+password or interval activates that option. The master overrides all three.
+Unchecking an option disables it and removes its configuration. Unchecking
+the master disables all options and removes their configurations. Re-enabling
+starts fresh and never restores an old password or interval.
 If cleanup fails, the master remains off; check the reported file permissions.
 
 ## Emergency destruction password
@@ -11,8 +15,12 @@ If cleanup fails, the master remains off; check the reported file permissions.
 A separate, confirmed password entered at the normal unlock screen overwrites
 this vault copy with cryptographic random bytes at its exact existing length.
 It reports a generic damaged/unreadable-vault error and ends the worker.
-The password must be at least 16 characters and different from the normal and
-dummy passwords. See [EMERGENCY_PASSWORD.md](EMERGENCY_PASSWORD.md).
+New passwords have no minimum and a maximum of 128 Unicode characters.
+The strength indicator is advice, not an enforced complexity rule. The password
+must differ from the normal and dummy passwords; reuse is checked against
+salted verifiers even if their ciphertext binding has become stale.
+Resetting an option replaces its verifier without requesting the old password.
+Fields always open blank and settings show no configured/armed status. See [EMERGENCY_PASSWORD.md](EMERGENCY_PASSWORD.md).
 
 ## Dummy password
 
@@ -53,7 +61,7 @@ companion files or use another OpenPGP/KeePass application.
 
 | Adjacent file suffix | Contents |
 | --- | --- |
-| `.pgpcrypt-protection` | Master enabled/disabled flag |
+| `.pgpcrypt-protection` | Master and per-option enabled/disabled flags |
 | `.pgpcrypt-emergency` | Salted emergency-password verifier and ciphertext binding |
 | `.pgpcrypt-dummy` | Salted dummy-password verifier and ciphertext binding |
 | `.pgpcrypt-expiry` | Inactivity interval, last normal unlock, deadline and ciphertext binding |

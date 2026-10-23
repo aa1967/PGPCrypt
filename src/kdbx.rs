@@ -3,7 +3,7 @@
 //! performs all encryption, key derivation and authentication.
 use crate::{
     pgp,
-    vault::{Document, MAX_SIZE, RevocationTicket, VaultData},
+    vault::{Document, MAX_SIZE, Profile, RevocationTicket, VaultData},
 };
 use anyhow::{Context, Result, bail, ensure};
 use keepass::{
@@ -246,17 +246,20 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
     let mut data = VaultData::default();
     let mut settings = false;
     let mut fingerprints = HashSet::new();
+    let mut identities = HashMap::new();
+    let mut identity_entries_required = false;
     for entry in group.entries() {
         ensure!(
             entry.get(SCHEMA) == Some("1")
                 || (entry.get(MARKER) == Some("settings")
-                    && matches!(entry.get(SCHEMA), Some("2" | "3" | "4"))),
+                    && matches!(entry.get(SCHEMA), Some("2" | "3" | "4" | "5"))),
             "Unsupported PGPCrypt KDBX entry schema"
         );
         match entry.get(MARKER) {
             Some("settings") => {
                 ensure!(!settings, "Duplicate PGPCrypt settings");
                 settings = true;
+                identity_entries_required = entry.get(SCHEMA) == Some("5");
                 data.default_signing_key = entry
                     .get("PGPCrypt.DefaultSigningKey")
                     .unwrap_or_default()
@@ -277,6 +280,27 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
                     .get("PGPCrypt.IdleTimeoutSeconds")
                     .context("Missing timeout")?
                     .parse()?;
+            }
+            Some("identity") => {
+                let identity = Profile {
+                    id: entry
+                        .get("PGPCrypt.ProfileId")
+                        .context("Missing identity ID")?
+                        .to_owned(),
+                    name: entry
+                        .get("Title")
+                        .context("Missing identity title")?
+                        .to_owned(),
+                    username: entry.get("UserName").unwrap_or_default().to_owned(),
+                    email: entry.get("Email").unwrap_or_default().to_owned(),
+                    url: entry.get("URL").unwrap_or_default().to_owned(),
+                    notes: entry.get("Notes").unwrap_or_default().to_owned(),
+                    fingerprints: Vec::new(),
+                };
+                ensure!(
+                    identities.insert(identity.id.clone(), identity).is_none(),
+                    "Duplicate identity entry"
+                );
             }
             Some("document") => {
                 data.documents.push(Document {
@@ -353,6 +377,29 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
         settings && (60..=3600).contains(&data.idle_timeout_seconds),
         "Missing/invalid PGPCrypt settings"
     );
+    if identity_entries_required {
+        // The standard entry fields are authoritative so KeePassXC edits are
+        // portable. The protected settings record retains stable memberships.
+        ensure!(
+            identities.len() == data.profiles.len(),
+            "Missing or unexpected identity entries"
+        );
+        for profile in &mut data.profiles {
+            let identity = identities
+                .remove(&profile.id)
+                .context("Missing identity entry")?;
+            profile.name = identity.name.clone();
+            profile.username = identity.username.clone();
+            profile.email = identity.email.clone();
+            profile.url = identity.url.clone();
+            profile.notes = identity.notes.clone();
+        }
+    } else {
+        ensure!(
+            identities.is_empty(),
+            "Identity entries require PGPCrypt settings schema 5"
+        );
+    }
     data.validate()?;
     Ok((data, db))
 }
@@ -374,7 +421,20 @@ fn set_key(entry: &mut Entry, bytes: &[u8], data: &VaultData) -> Result<()> {
         cert.with_policy(&sequoia_openpgp::policy::StandardPolicy::new(), None)
             .ok()
             .and_then(|valid| valid.userids().revoked(false).next())
-            .map(|u| String::from_utf8_lossy(u.userid().value()).into_owned())
+            .map(|u| {
+                String::from_utf8_lossy(u.userid().value())
+                    .chars()
+                    .map(|c| {
+                        // User IDs are OpenPGP data, not necessarily XML text. Keep
+                        // exact bytes in armor, while making the display title safe.
+                        if c.is_control() || matches!(c, '\u{fffe}' | '\u{ffff}') {
+                            '\u{fffd}'
+                        } else {
+                            c
+                        }
+                    })
+                    .collect::<String>()
+            })
             .unwrap_or_else(|| fingerprint.clone()),
     );
     entry.set_unprotected(MARKER, "key");
@@ -451,7 +511,7 @@ pub fn write(
             };
             settings.set_unprotected("Title", "Vault notes and settings");
             settings.set_unprotected(MARKER, "settings");
-            settings.set_unprotected(SCHEMA, "4");
+            settings.set_unprotected(SCHEMA, "5");
             settings.set_protected("PGPCrypt.Profiles", serde_json::to_string(&data.profiles)?);
             settings.set_protected(
                 "PGPCrypt.Preferences",
@@ -487,11 +547,15 @@ pub fn write(
             .as_ref()
             .entries()
             .filter(|entry| {
-                entry.get(MARKER) == Some("document")
+                (entry.get(MARKER) == Some("document")
                     && !data
                         .documents
                         .iter()
-                        .any(|doc| entry.get("PGPCrypt.DocumentId") == Some(doc.id.as_str()))
+                        .any(|doc| entry.get("PGPCrypt.DocumentId") == Some(doc.id.as_str())))
+                    || (entry.get(MARKER) == Some("identity")
+                        && !data.profiles.iter().any(|profile| {
+                            entry.get("PGPCrypt.ProfileId") == Some(profile.id.as_str())
+                        }))
             })
             .map(|entry| entry.id())
             .collect::<Vec<_>>();
@@ -500,6 +564,29 @@ pub fn write(
                 .entry_mut(id)
                 .context("Missing document entry")?
                 .remove();
+        }
+        for profile in &data.profiles {
+            let existing = group
+                .as_ref()
+                .entries()
+                .find(|entry| {
+                    entry.get(MARKER) == Some("identity")
+                        && entry.get("PGPCrypt.ProfileId") == Some(profile.id.as_str())
+                })
+                .map(|entry| entry.id());
+            let mut entry = if let Some(id) = existing {
+                group.entry_mut(id).context("Missing identity entry")?
+            } else {
+                group.add_entry()
+            };
+            entry.set_unprotected("Title", &profile.name);
+            entry.set_unprotected(MARKER, "identity");
+            entry.set_unprotected(SCHEMA, "1");
+            entry.set_unprotected("PGPCrypt.ProfileId", &profile.id);
+            entry.set_protected("UserName", &profile.username);
+            entry.set_protected("Email", &profile.email);
+            entry.set_protected("URL", &profile.url);
+            entry.set_protected("Notes", &profile.notes);
         }
         for document in &data.documents {
             let existing = group
@@ -536,6 +623,63 @@ pub fn write(
 mod tests {
     use super::*;
     const PASS: &str = "disposable kdbx test passphrase";
+
+    #[test]
+    fn identity_standard_fields_accept_external_edits_and_require_stable_ids() -> Result<()> {
+        let mut data = VaultData::default();
+        let id = crate::vault::workspace_id()?;
+        data.profiles.push(Profile {
+            id: id.clone(),
+            name: "Personal".into(),
+            fingerprints: Vec::new(),
+            username: "Original alias".into(),
+            email: "original@example.invalid".into(),
+            url: "https://example.invalid/old".into(),
+            notes: "original notes".into(),
+        });
+        let mut bytes = Vec::new();
+        write(&data, None, PASS, &mut bytes)?;
+        let (_, mut db) = open(&bytes, PASS)?;
+        {
+            let root = db.root();
+            let group = root.groups().find(|group| group.name == GROUP).unwrap();
+            let entry = group
+                .entries()
+                .find(|entry| entry.get(MARKER) == Some("identity"))
+                .unwrap();
+            assert_eq!(entry.get("Title"), Some("Personal"));
+            for field in ["UserName", "Email", "URL", "Notes"] {
+                assert!(entry.fields[field].is_protected());
+            }
+        }
+        db.foreach_entry_mut(|mut entry| {
+            if entry.get(MARKER) == Some("identity") {
+                entry.set_unprotected("Title", "Edited identity");
+                entry.set_protected("UserName", "Edited alias");
+                entry.set_protected("Notes", "Edited in another client");
+            }
+        });
+        let mut changed = Vec::new();
+        db.save(&mut changed, DatabaseKey::new().with_password(PASS))?;
+        let (loaded, _) = open(&changed, PASS)?;
+        assert_eq!(loaded.profiles[0].id, id);
+        assert_eq!(loaded.profiles[0].name, "Edited identity");
+        assert_eq!(loaded.profiles[0].username, "Edited alias");
+        assert_eq!(loaded.profiles[0].notes, "Edited in another client");
+        db.foreach_entry_mut(|mut entry| {
+            if entry.get(MARKER) == Some("identity") {
+                entry.set_unprotected("PGPCrypt.ProfileId", crate::vault::workspace_id().unwrap());
+            }
+        });
+        let mut damaged = Vec::new();
+        db.save(&mut damaged, DatabaseKey::new().with_password(PASS))?;
+        assert!(
+            open(&damaged, PASS).is_err(),
+            "identity membership cannot silently detach"
+        );
+        Ok(())
+    }
+
     #[test]
     fn portable_fields_integrity_and_preservation() -> Result<()> {
         let mut data = VaultData::default();

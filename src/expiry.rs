@@ -170,13 +170,13 @@ fn read_record(path: &Path) -> Result<Option<Record>> {
     Ok(Some(record))
 }
 
-fn record_destination(path: &Path) -> Result<bool> {
+fn record_destination(path: &Path) -> Result<Option<Metadata>> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
             validate_private(&metadata, true)?;
-            Ok(true)
+            Ok(Some(metadata))
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
 }
@@ -184,12 +184,15 @@ fn record_destination(path: &Path) -> Result<bool> {
 fn write_record(path: &Path, record: &Record) -> Result<()> {
     validate_record(record)?;
     let path = sidecar_path(path);
-    let existed = record_destination(&path)?;
+    let expected = record_destination(&path)?;
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let directory = File::open(parent)?;
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(parent)?;
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     temp.as_file()
         .set_permissions(Permissions::from_mode(0o600))?;
@@ -200,11 +203,16 @@ fn write_record(path: &Path, record: &Record) -> Result<()> {
     );
     temp.write_all(&bytes)?;
     temp.as_file().sync_all()?;
+    let current = record_destination(&path)?;
     ensure!(
-        record_destination(&path)? == existed,
+        match (&expected, &current) {
+            (None, None) => true,
+            (Some(before), Some(now)) => same_file(before, now),
+            _ => false,
+        },
         "Inactivity-protection record changed while saving"
     );
-    if existed {
+    if expected.is_some() {
         temp.persist(&path).map_err(|error| error.error)?;
     } else {
         temp.persist_noclobber(&path).map_err(|error| error.error)?;
@@ -218,7 +226,7 @@ pub fn status(path: &Path, ciphertext: &[u8]) -> Result<Status> {
         return Ok(Status::default());
     };
     ensure!(ciphertext.len() <= MAX_VAULT, "Oversized vault");
-    let armed = crate::protection::enabled(path)?
+    let armed = crate::protection::option_enabled(path, crate::protection::OptionKind::Expiry)?
         && digest(ciphertext)? == record.ciphertext_sha256
         && current_snapshot(path).is_ok_and(|current| current == ciphertext);
     Ok(Status {
@@ -234,8 +242,8 @@ pub fn status(path: &Path, ciphertext: &[u8]) -> Result<Status> {
 /// Caller holds the real vault lock and has completed a normal unlock.
 pub fn configure(path: &Path, ciphertext: &[u8], count: u32, unit: &str, now: u64) -> Result<()> {
     ensure!(
-        crate::protection::enabled(path)?,
-        "Enable vault protection before configuring inactivity deletion"
+        crate::protection::option_enabled(path, crate::protection::OptionKind::Expiry)?,
+        "Enable the inactivity-deletion option before setting its period"
     );
     ensure!(now > 0, "The device clock is unavailable");
     let seconds = duration(count, unit)?;
@@ -257,26 +265,11 @@ pub fn configure(path: &Path, ciphertext: &[u8], count: u32, unit: &str, now: u6
 }
 
 pub fn disable(path: &Path) -> Result<()> {
-    let path = sidecar_path(path);
-    if !record_destination(&path)? {
-        return Ok(());
-    }
-    let file = open_private(&path, false, true)?;
-    ensure!(
-        same_file(&file.metadata()?, &fs::symlink_metadata(&path)?),
-        "Inactivity-protection record changed"
-    );
-    fs::remove_file(&path)?;
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    File::open(parent)?.sync_all()?;
-    Ok(())
+    crate::protection::set_option(path, crate::protection::OptionKind::Expiry, false)
 }
 
 pub fn refresh_after_save(path: &Path, previous: &[u8], committed: &[u8]) -> Result<()> {
-    if !crate::protection::enabled(path)? {
+    if !crate::protection::option_enabled(path, crate::protection::OptionKind::Expiry)? {
         return Ok(());
     }
     let Some(mut record) = read_record(path)? else {
@@ -300,7 +293,7 @@ pub fn refresh_after_save(path: &Path, previous: &[u8], committed: &[u8]) -> Res
 /// Only a successful normal-password unlock calls this. Clock rollback never
 /// moves the existing last-open time backward or shortens its reset deadline.
 pub fn record_normal_open(path: &Path, ciphertext: &[u8], now: u64) -> Result<()> {
-    if !crate::protection::enabled(path)? {
+    if !crate::protection::option_enabled(path, crate::protection::OptionKind::Expiry)? {
         return Ok(());
     }
     let Some(mut record) = read_record(path)? else {
@@ -325,7 +318,7 @@ pub fn record_normal_open(path: &Path, ciphertext: &[u8], now: u64) -> Result<()
 /// Run before decrypting. Only a matching, safe, enabled record can authorize
 /// destruction. Missing/malformed/stale records leave normal opening available.
 pub fn check_and_destroy_if_expired(path: &Path, now: u64) -> Result<bool> {
-    if !crate::protection::enabled(path)? {
+    if !crate::protection::option_enabled(path, crate::protection::OptionKind::Expiry)? {
         return Ok(false);
     }
     let record = match read_record(path) {
@@ -340,10 +333,12 @@ pub fn check_and_destroy_if_expired(path: &Path, now: u64) -> Result<bool> {
         Ok(bytes) => bytes,
         Err(_) => return Ok(false),
     };
-    if digest(&current)? != record.ciphertext_sha256 || !crate::protection::enabled(path)? {
+    if digest(&current)? != record.ciphertext_sha256
+        || !crate::protection::option_enabled(path, crate::protection::OptionKind::Expiry)?
+    {
         return Ok(false);
     }
-    crate::duress::destroy_matching(path, &current)
+    crate::duress::destroy_matching(path, &current, crate::protection::OptionKind::Expiry)
         .map_err(|_| anyhow::Error::new(crate::duress::DestructionTriggered))?;
     Ok(true)
 }
@@ -363,6 +358,7 @@ mod tests {
             .open(&path)?;
         file.write_all(&bytes)?;
         crate::protection::enable(&path)?;
+        crate::protection::set_option(&path, crate::protection::OptionKind::Expiry, true)?;
         Ok((dir, path, bytes))
     }
 
@@ -433,6 +429,25 @@ mod tests {
         assert_eq!(fs::read(&path)?, bytes);
         disable(&path)?;
         assert!(!sidecar_path(&path).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn disabling_option_erases_deadline_and_reenable_requires_a_new_policy() -> Result<()> {
+        let (_dir, path, bytes) = fixture()?;
+        let start = 1_700_000_000;
+        configure(&path, &bytes, 1, "days", start)?;
+        disable(&path)?;
+        assert!(!sidecar_path(&path).exists());
+        assert!(!crate::protection::options(&path)?.expiry);
+        assert!(!check_and_destroy_if_expired(&path, start + 100 * DAY)?);
+        assert!(configure(&path, &bytes, 1, "days", start).is_err());
+        crate::protection::set_option(&path, crate::protection::OptionKind::Expiry, true)?;
+        assert!(!check_and_destroy_if_expired(&path, start + 100 * DAY)?);
+        assert!(!sidecar_path(&path).exists());
+        configure(&path, &bytes, 2, "weeks", start + 100 * DAY)?;
+        assert!(status(&path, &bytes)?.armed);
+        assert_eq!(fs::read(&path)?, bytes);
         Ok(())
     }
 }

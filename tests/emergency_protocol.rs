@@ -90,7 +90,21 @@ fn emergency_configuration_save_refresh_disable_and_trigger() -> Result<()> {
             "master-off must reject configuration"
         );
         peer.ok("protection_enable", json!({}))?;
-        for rejected in [normal, "short"] {
+        assert_eq!(
+            peer.ok("protection_status", json!({}))?["emergency_enabled"],
+            false
+        );
+        assert_eq!(
+            peer.raw("emergency_set", json!({"new_password":emergency}))?["ok"],
+            false,
+            "an unchecked option must reject configuration"
+        );
+        peer.ok(
+            "protection_option_enable",
+            json!({"protection_option":"emergency"}),
+        )?;
+        let too_long = "x".repeat(129);
+        for rejected in [normal, too_long.as_str()] {
             assert_eq!(
                 peer.raw("emergency_set", json!({"new_password":rejected}))?["ok"],
                 false
@@ -131,8 +145,19 @@ fn emergency_configuration_save_refresh_disable_and_trigger() -> Result<()> {
             !pgpcrypt::duress::sidecar_path(&copy).exists(),
             "conversion must not arm its destination"
         );
-        peer.ok("emergency_disable", json!({}))?;
+        peer.ok(
+            "protection_option_disable",
+            json!({"protection_option":"emergency"}),
+        )?;
         assert!(!record.exists());
+        peer.ok(
+            "protection_option_enable",
+            json!({"protection_option":"emergency"}),
+        )?;
+        assert!(
+            !record.exists(),
+            "enabling must not restore an old password"
+        );
         peer.ok("emergency_set", json!({"new_password":emergency}))?;
         let before = fs::read(&path)?;
         peer.lock()?;
@@ -182,6 +207,12 @@ fn dummy_password_is_an_empty_read_only_view_and_never_changes_the_real_vault() 
         )?["id"]
             .clone();
         peer.ok("protection_enable", json!({}))?;
+        for option in ["dummy", "emergency"] {
+            peer.ok(
+                "protection_option_enable",
+                json!({"protection_option":option}),
+            )?;
+        }
         assert_eq!(
             peer.raw("dummy_set", json!({"new_password":normal}))?["ok"],
             false
@@ -274,6 +305,11 @@ fn inactivity_resets_on_normal_unlock_and_destroys_before_decryption_when_overdu
         let path = dir.path().join("time-gated-vault");
         let vault = Vault::create_format(&path, normal, format)?;
         vault.protection_enable()?;
+        pgpcrypt::protection::set_option(
+            vault.path(),
+            pgpcrypt::protection::OptionKind::Expiry,
+            true,
+        )?;
         vault.expiry_configure(1, "days", now - 3600)?;
         drop(vault);
         let before = fs::read(&path)?;
@@ -312,6 +348,172 @@ fn inactivity_resets_on_normal_unlock_and_destroys_before_decryption_when_overdu
         assert_eq!(after.len(), before.len());
         assert_ne!(after, before);
         assert!(Vault::open(&path, normal).is_err());
+    }
+    Ok(())
+}
+
+#[test]
+fn option_toggles_reset_passwords_without_revealing_or_resurrecting_configuration() -> Result<()> {
+    // Every path is a disposable fixture; the real user vault is never opened.
+    for format in ["age", "kdbx"] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("toggle-fixture");
+        let normal = "n";
+        let mut peer = Peer::new()?;
+        peer.ok(
+            "create",
+            json!({"path":path,"format":format,"password":normal}),
+        )?;
+        peer.ok("document_save", json!({"text":"Real private content"}))?;
+        peer.ok("protection_enable", json!({}))?;
+        for option in ["dummy", "emergency", "expiry"] {
+            peer.ok(
+                "protection_option_enable",
+                json!({"protection_option":option}),
+            )?;
+        }
+        // Empty and one-character alternatives have no minimum, but must differ
+        // from the main password and every other configured alternative.
+        peer.ok("dummy_set", json!({"new_password":""}))?;
+        assert_eq!(
+            peer.raw("emergency_set", json!({"new_password":""}))?["ok"],
+            false
+        );
+        peer.ok("emergency_set", json!({"new_password":"x"}))?;
+        assert_eq!(
+            peer.raw("dummy_set", json!({"new_password":"x"}))?["ok"],
+            false
+        );
+        peer.ok(
+            "expiry_set",
+            json!({"expiry_count":2,"expiry_unit":"weeks"}),
+        )?;
+        let snapshot = fs::read(&path)?;
+        peer.lock()?;
+        let mut blank = Peer::new()?;
+        assert_eq!(
+            blank.ok("open", json!({"path":path,"password":""}))?["read_only"],
+            true
+        );
+        assert_eq!(
+            blank.ok("documents_list", json!({}))?["documents"],
+            json!([])
+        );
+        assert_eq!(
+            blank.raw(
+                "document_properties",
+                json!({"document_id":"missing","title":"changed"})
+            )?["ok"],
+            false
+        );
+        blank.lock()?;
+        assert_eq!(fs::read(&path)?, snapshot);
+        let mut peer = Peer::new()?;
+        peer.ok("open", json!({"path":path,"password":normal}))?;
+        let record_path = pgpcrypt::duress::dummy_sidecar_path(&path);
+        let previous: Value = serde_json::from_slice(&fs::read(&record_path)?)?;
+        // Reset requires no knowledge of the old alternative. A fresh random
+        // salt is generated even when reusing the same option's password.
+        peer.ok("dummy_set", json!({"new_password":"y"}))?;
+        let mut replacement: Value = serde_json::from_slice(&fs::read(&record_path)?)?;
+        assert_ne!(replacement["salt"], previous["salt"]);
+        assert_ne!(replacement["verifier"], previous["verifier"]);
+        assert_eq!(replacement["salt"].as_array().unwrap().len(), 16);
+        assert_eq!(replacement["verifier"].as_array().unwrap().len(), 32);
+        // A stale binding must not let a second option reuse a configured
+        // password: duplicate validation is independent of trigger matching.
+        replacement["ciphertext_sha256"] = json!(vec![0u8; 32]);
+        fs::write(&record_path, serde_json::to_vec(&replacement)?)?;
+        assert_eq!(
+            peer.raw("emergency_set", json!({"new_password":"y"}))?["ok"],
+            false
+        );
+        peer.ok("dummy_set", json!({"new_password":"y"}))?;
+        let status = peer.ok("protection_status", json!({}))?;
+        assert_eq!(status["enabled"], true);
+        assert_eq!(status["dummy_enabled"], true);
+        assert_eq!(status["emergency_enabled"], true);
+        assert_eq!(status["expiry_enabled"], true);
+        for property in [
+            "password",
+            "new_password",
+            "salt",
+            "verifier",
+            "configured",
+            "armed",
+        ] {
+            assert!(status.get(property).is_none(), "status exposed {property}");
+        }
+        peer.ok(
+            "protection_option_disable",
+            json!({"protection_option":"dummy"}),
+        )?;
+        assert!(!record_path.exists());
+        peer.ok(
+            "protection_option_enable",
+            json!({"protection_option":"dummy"}),
+        )?;
+        assert!(
+            !record_path.exists(),
+            "checking the option must start empty"
+        );
+        assert_eq!(
+            peer.ok("protection_status", json!({}))?["dummy_enabled"],
+            true
+        );
+        peer.lock()?;
+        let mut peer = Peer::new()?;
+        assert_eq!(
+            peer.raw("open", json!({"path":path,"password":"y"}))?["ok"],
+            false
+        );
+        assert_eq!(
+            peer.raw("open", json!({"path":path,"password":""}))?["ok"],
+            false
+        );
+        peer.ok("open", json!({"path":path,"password":normal}))?;
+        assert_eq!(
+            peer.ok("documents_list", json!({}))?["documents"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        peer.ok("dummy_set", json!({"new_password":"y"}))?;
+        peer.ok("protection_disable", json!({}))?;
+        for record in [
+            pgpcrypt::duress::sidecar_path(&path),
+            record_path,
+            pgpcrypt::expiry::sidecar_path(&path),
+        ] {
+            assert!(
+                !record.exists(),
+                "master-off must erase every option record"
+            );
+        }
+        peer.ok("protection_enable", json!({}))?;
+        let status = peer.ok("protection_status", json!({}))?;
+        assert_eq!(status["enabled"], true);
+        for field in ["dummy_enabled", "emergency_enabled", "expiry_enabled"] {
+            assert_eq!(status[field], false, "master re-enable retained {field}");
+        }
+        assert_eq!(
+            peer.raw("dummy_set", json!({"new_password":"y"}))?["ok"],
+            false
+        );
+        peer.lock()?;
+        let mut peer = Peer::new()?;
+        assert_eq!(
+            peer.raw("open", json!({"path":path,"password":"x"}))?["ok"],
+            false
+        );
+        assert_eq!(
+            fs::read(&path)?,
+            snapshot,
+            "disabled emergency password changed the vault"
+        );
+        peer.ok("open", json!({"path":path,"password":normal}))?;
+        peer.lock()?;
     }
     Ok(())
 }

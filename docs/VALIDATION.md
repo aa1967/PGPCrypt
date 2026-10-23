@@ -1,5 +1,76 @@
 # Validation history
 
+## Alpha10 evidence
+
+Functional source `c98830b` and GUI validation fixes `d528114`/`d22db75` were
+pushed before their functional checks. All 68 Rust tests passed: 52 core,
+4 protection protocol, 1 GnuPG interoperability and 11 worker/lifecycle checks.
+New coverage includes blank/short passwords, 128 Unicode character bounds,
+legacy long-key passwords, verified private exports including mixed protected
+and unprotected packets, master/option disable-and-erase behavior, reset without
+old passwords, fresh salts and stale-verifier password reuse rejection.
+Destruction checks used only fresh disposable fixtures.
+
+Identity metadata and stable document IDs, collision suffixes, properties-only
+updates, profile deletion/moves and both conversion directions passed. The
+independent Debian age implementation decrypted schema 6 and produced readable
+fixtures for schemas 1–6, including a 216-character legacy vault password.
+KeePassXC 2.7.10 read protected key/document/identity fields, edited standard
+identity UserName/URL/Notes fields, reopened them in PGPCrypt and preserved them
+through conversion. Existing unrelated-entry and stale-write checks passed.
+
+The packaged age and KDBX Qt workflows passed, including authenticated private
+export, actual master warning/button and per-option checkbox paths, blank masked
+password dialogs, short-password setup, save rebinding, disable/erase and clean
+re-enable. Four-page navigation, profiles/documents, verification identity,
+Copy/Paste, recent vaults, local broker approval/denial and worker shutdown remain
+covered. The supervisor replaced the UI process on lock. The enlarged Notepad
+layout was visually inspected offscreen. ELF/no-RPATH dependencies, package
+ownership/modes, source/licenses, Qubes handlers, security-library minimum and
+permission-error guidance passed without a system install. Rust compilation,
+formatting and Clippy, plus Qt warnings-as-errors compilation, passed.
+
+These checks are not a fresh-VM installation, real Qubes transport validation,
+physical erasure proof or independent security audit. Native compositor and
+clipboard behavior, power-loss recovery and remaining storage races are outside
+this evidence. Password strength is advisory; weak or blank passwords remain
+weak. KDBX writing is still experimental upstream. See SECURITY.md and
+VAULT_PROTECTION.md for the continuing boundaries.
+
+## Alpha9 evidence
+
+Functional source `fcfb8b3` was pushed before tests. All 49 Rust checks passed:
+37 core, 3 protection protocol, 1 GnuPG interop and 8 worker/lifecycle checks.
+Coverage includes purpose-separated password records, master-off disarming,
+unsafe file/record rejection, same-length destruction, dummy views that never
+decrypt or change real contents, normal-unlock deadline reset and overdue
+pre-decryption destruction. Destruction used only fresh disposable fixtures.
+
+Profiles scoped default signers/recipients/verification; new/imported keys joined
+the selected profile. Both conversion directions preserved memberships and saved
+text. Deleting profiles retained keys/documents, and deleted KDBX documents did
+not resurrect on later saves. Valid 4 MiB escaped documents passed private IPC,
+save/get/reopen in both formats. Independent Debian age compatibility passed for
+schemas 1–5; KeePassXC 2.7.10 read/edited protected document content and profiles,
+retained keys/unrelated entries and passed stale-write refusal and age conversion.
+
+The packaged age/KDBX Qt workflows and lock/restart check passed. These covered
+four-page navigation, profile filters, internal document browsing, verification
+identity display, actual Copy/Paste, read-only control restrictions, isolated
+recent-history persistence/clearing and one-click access to the password form.
+The Notepad layout was visually reviewed offscreen. A follow-up theme palette
+refresh was pushed as `833b651` before checking the updated GUI. Packaging checked
+ELF dependencies/no RPATH, owners/modes, source/license files, Qubes handlers,
+OpenSSL security minimum and writable-path guidance without a system install.
+Rust formatting/Clippy and C++ warnings-as-errors compilation passed.
+
+Real Qubes transport/host hooks, native clipboard/compositor behavior, physical
+erasure, forensic concealment, adversarial power-loss/filesystem behavior and an
+independent audit remain unverified. Inactivity depends on local clock/companion
+records and is bypassable by other software; dummy views are read-only. See
+[VAULT_PROTECTION.md](VAULT_PROTECTION.md). KDBX writing remains experimental
+upstream. Alpha8's advisory comparison was not a new comprehensive alpha9 audit.
+
 ## Alpha8 evidence
 
 Functional source `2901826` and follow-up test expectations `afda4f9` / `74f7347`
