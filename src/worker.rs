@@ -3,7 +3,7 @@
 //! explicit UI action, with disclosure of any unprotected secret packets.
 use crate::{
     pgp,
-    vault::{RevocationTicket, Vault, VaultFormat},
+    vault::{Document, Profile, RevocationTicket, Vault, VaultData, VaultFormat, workspace_id},
 };
 use anyhow::{Context, Result, bail, ensure};
 use sequoia_openpgp::cert::amalgamation::ValidAmalgamation;
@@ -13,10 +13,13 @@ use serde_json::{Value, json};
 use std::{
     io::{BufRead, Read, Write},
     path::Path,
+    time::{SystemTime, UNIX_EPOCH},
 };
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-pub const MAX_FRAME: usize = 8 * 1024 * 1024;
+// A valid 4 MiB document can double when JSON escapes whitespace/quotes.
+// Leave room for the envelope without changing the smaller Qubes protocol.
+pub const MAX_FRAME: usize = 10 * 1024 * 1024;
 
 #[derive(Deserialize, Zeroize, ZeroizeOnDrop)]
 #[serde(deny_unknown_fields)]
@@ -47,6 +50,20 @@ pub struct Request {
     pub preferences: Option<crate::vault::Preferences>,
     #[serde(default)]
     pub subkey_options: Option<pgp::SubkeyOptions>,
+    #[serde(default)]
+    pub profile_id: String,
+    #[serde(default)]
+    pub profile_name: String,
+    #[serde(default)]
+    pub profile_fingerprints: Vec<String>,
+    #[serde(default)]
+    pub document_id: String,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub expiry_count: Option<u32>,
+    #[serde(default)]
+    pub expiry_unit: String,
 }
 
 #[derive(Default)]
@@ -55,6 +72,13 @@ pub struct Session {
 }
 
 impl Session {
+    fn unix_now() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+
     fn vault(&self) -> Result<&Vault> {
         self.vault.as_ref().context("Vault is locked")
     }
@@ -68,8 +92,50 @@ impl Session {
             .collect()
     }
 
-    fn store(&mut self, cert: Cert) -> Result<()> {
+    fn certs_for_profile(&self, id: &str) -> Result<Vec<Cert>> {
+        let mut certs = self.certs()?;
+        if !id.is_empty() {
+            let profile = self
+                .vault()?
+                .data
+                .profiles
+                .iter()
+                .find(|profile| profile.id == id)
+                .context("Profile no longer exists")?;
+            certs.retain(|cert| profile.fingerprints.contains(&cert.fingerprint().to_hex()));
+        }
+        Ok(certs)
+    }
+
+    fn change_workspace<T>(
+        &mut self,
+        change: impl FnOnce(&mut VaultData) -> Result<T>,
+    ) -> Result<T> {
         let vault = self.vault.as_mut().context("Vault is locked")?;
+        let old = vault.data.clone();
+        let result = change(&mut vault.data).and_then(|result| vault.save().map(|_| result));
+        if result.is_err() {
+            vault.data = old;
+        }
+        result
+    }
+
+    fn add_profile_member(data: &mut VaultData, id: &str, fingerprint: &str) -> Result<()> {
+        if !id.is_empty() {
+            let profile = data
+                .profiles
+                .iter_mut()
+                .find(|p| p.id == id)
+                .context("Profile no longer exists")?;
+            if !profile.fingerprints.iter().any(|fp| fp == fingerprint) {
+                profile.fingerprints.push(fingerprint.to_owned());
+            }
+        }
+        Ok(())
+    }
+
+    fn store(&mut self, cert: Cert, profile_id: &str) -> Result<()> {
+        let vault = self.vault()?;
         let mut position = None;
         let mut merged = cert;
         for (i, bytes) in vault.data.certificates.iter().enumerate() {
@@ -81,29 +147,43 @@ impl Session {
             }
         }
         let encoded = pgp::encode(&merged)?;
-        if let Some(i) = position {
-            let old = Zeroizing::new(std::mem::replace(
-                &mut vault.data.certificates[i],
-                encoded.to_vec(),
-            ));
-            if let Err(error) = vault.save() {
-                vault.data.certificates[i].zeroize();
-                vault.data.certificates[i] = old.to_vec();
-                return Err(error);
+        let fingerprint = merged.fingerprint().to_hex();
+        self.change_workspace(|data| {
+            Self::add_profile_member(data, profile_id, &fingerprint)?;
+            if let Some(i) = position {
+                data.certificates[i].zeroize();
+                data.certificates[i] = encoded.to_vec();
+            } else {
+                data.certificates.push(encoded.to_vec());
             }
-        } else {
-            vault.data.certificates.push(encoded.to_vec());
-            if let Err(error) = vault.save() {
-                if let Some(mut bytes) = vault.data.certificates.pop() {
-                    bytes.zeroize();
-                }
-                return Err(error);
-            }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     pub fn handle(&mut self, request: &Request) -> Result<Value> {
+        if self.vault.as_ref().is_some_and(Vault::is_read_only) {
+            ensure!(
+                matches!(
+                    request.op.as_str(),
+                    "status"
+                        | "list"
+                        | "profiles_list"
+                        | "documents_list"
+                        | "document_get"
+                        | "public_export"
+                        | "private_export"
+                        | "protected_private_export"
+                        | "subkeys"
+                        | "encrypt"
+                        | "sign"
+                        | "decrypt"
+                        | "verify"
+                        | "notes_get"
+                        | "lock"
+                ),
+                "Vault is read-only"
+            );
+        }
         match request.op.as_str() {
             "status" => Ok(json!({"unlocked": self.vault.is_some()})),
             "create" | "open" => {
@@ -115,10 +195,29 @@ impl Session {
                         VaultFormat::parse(&request.format)?,
                     )?
                 } else {
-                    Vault::open(Path::new(&request.path), &request.password)?
+                    let path = crate::vault::resolve(Path::new(&request.path))?;
+                    if crate::expiry::check_and_destroy_if_expired(&path, Self::unix_now())? {
+                        return Err(crate::duress::DestructionTriggered.into());
+                    }
+                    if crate::duress::check_and_destroy(&path, &request.password)? {
+                        return Err(crate::duress::DestructionTriggered.into());
+                    }
+                    if crate::duress::dummy_matches(&path, &request.password)? {
+                        Vault::open_empty_read_only(&path)?
+                    } else {
+                        Vault::open(&path, &request.password)?
+                    }
                 });
+                let protection_warning = if request.op == "open"
+                    && !self.vault()?.is_read_only()
+                    && self.vault()?.record_normal_open(Self::unix_now()).is_err()
+                {
+                    "Inactivity protection could not be refreshed. Check Settings before relying on its deadline."
+                } else {
+                    ""
+                };
                 Ok(
-                    json!({"unlocked":true,"format":self.vault()?.format().name(),"idle_timeout_seconds":self.vault()?.data.idle_timeout_seconds,"default_signing_key":self.vault()?.data.default_signing_key,"preferences":self.vault()?.data.preferences}),
+                    json!({"unlocked":true,"read_only":self.vault()?.is_read_only(),"protection_warning":protection_warning,"format":self.vault()?.format().name(),"idle_timeout_seconds":self.vault()?.data.idle_timeout_seconds,"default_signing_key":self.vault()?.data.default_signing_key,"preferences":self.vault()?.data.preferences}),
                 )
             }
             "convert_copy" => {
@@ -128,6 +227,57 @@ impl Session {
                     VaultFormat::parse(&request.format)?,
                 )?;
                 Ok(json!({"saved":true,"source_unchanged":true}))
+            }
+            "emergency_status" => match self.vault()?.emergency_status() {
+                Ok(status) => Ok(serde_json::to_value(status)?),
+                Err(_) => Ok(json!({"configured":true,"armed":false,"unavailable":true})),
+            },
+            "protection_status" => Ok(json!({"enabled":self.vault()?.protection_enabled()?})),
+            "protection_enable" => {
+                self.vault()?.protection_enable()?;
+                Ok(json!({"enabled":true}))
+            }
+            "protection_disable" => {
+                self.vault()?.protection_disable()?;
+                Ok(json!({"enabled":false}))
+            }
+            "expiry_status" => match self.vault()?.expiry_status() {
+                Ok(status) => Ok(serde_json::to_value(status)?),
+                Err(_) => Ok(json!({"configured":true,"armed":false,"unavailable":true})),
+            },
+            "expiry_set" => {
+                self.vault()?.expiry_configure(
+                    request
+                        .expiry_count
+                        .context("Choose an inactivity interval")?,
+                    &request.expiry_unit,
+                    Self::unix_now(),
+                )?;
+                Ok(json!({"configured":true,"armed":true}))
+            }
+            "expiry_disable" => {
+                self.vault()?.expiry_disable()?;
+                Ok(json!({"configured":false,"armed":false}))
+            }
+            "emergency_set" => {
+                self.vault()?.emergency_configure(&request.new_password)?;
+                Ok(json!({"configured":true,"armed":true}))
+            }
+            "emergency_disable" => {
+                self.vault()?.emergency_disable()?;
+                Ok(json!({"configured":false,"armed":false}))
+            }
+            "dummy_status" => match self.vault()?.dummy_status() {
+                Ok(status) => Ok(serde_json::to_value(status)?),
+                Err(_) => Ok(json!({"configured":true,"armed":false,"unavailable":true})),
+            },
+            "dummy_set" => {
+                self.vault()?.dummy_configure(&request.new_password)?;
+                Ok(json!({"configured":true,"armed":true}))
+            }
+            "dummy_disable" => {
+                self.vault()?.dummy_disable()?;
+                Ok(json!({"configured":false,"armed":false}))
             }
             "lock" => {
                 self.vault = None;
@@ -161,8 +311,130 @@ impl Session {
                         "can_sign":status == "Valid" && cert.keys().secret().with_policy(&policy,None).supported().alive().revoked(false).for_signing().next().is_some()})
                 }).collect();
                 Ok(
-                    json!({"keys":keys,"default_signing_key":self.vault()?.data.default_signing_key}),
+                    json!({"keys":keys,"profiles":vault.data.profiles,"default_signing_key":self.vault()?.data.default_signing_key}),
                 )
+            }
+            "profiles_list" => Ok(json!({"profiles":self.vault()?.data.profiles})),
+            "profile_save" => {
+                let id = if request.profile_id.is_empty() {
+                    workspace_id()?
+                } else {
+                    request.profile_id.clone()
+                };
+                self.change_workspace(|data| {
+                    let profile = Profile {
+                        id: id.clone(),
+                        name: request.profile_name.trim().to_owned(),
+                        fingerprints: request.profile_fingerprints.clone(),
+                    };
+                    if request.profile_id.is_empty() {
+                        data.profiles.push(profile);
+                    } else {
+                        let old = data
+                            .profiles
+                            .iter_mut()
+                            .find(|profile| profile.id == id)
+                            .context("Profile no longer exists")?;
+                        *old = profile;
+                    }
+                    Ok(())
+                })?;
+                Ok(json!({"saved":true,"id":id}))
+            }
+            "profile_delete" => {
+                ensure!(!request.profile_id.is_empty(), "All cannot be deleted");
+                self.change_workspace(|data| {
+                    let index = data
+                        .profiles
+                        .iter()
+                        .position(|profile| profile.id == request.profile_id)
+                        .context("Profile no longer exists")?;
+                    data.profiles.remove(index);
+                    for document in &mut data.documents {
+                        if document.profile_id == request.profile_id {
+                            document.profile_id.clear();
+                        }
+                    }
+                    Ok(())
+                })?;
+                Ok(json!({"saved":true}))
+            }
+            "documents_list" => {
+                let data = &self.vault()?.data;
+                ensure!(
+                    request.profile_id.is_empty()
+                        || data
+                            .profiles
+                            .iter()
+                            .any(|profile| profile.id == request.profile_id),
+                    "Profile no longer exists"
+                );
+                let documents=data.documents.iter().filter(|document|request.profile_id.is_empty() || document.profile_id==request.profile_id).map(|document|json!({"id":document.id,"title":document.title,"profile_id":document.profile_id,"created_at":document.created_at,"updated_at":document.updated_at})).collect::<Vec<_>>();
+                Ok(json!({"documents":documents}))
+            }
+            "document_get" => {
+                let document = self
+                    .vault()?
+                    .data
+                    .documents
+                    .iter()
+                    .find(|document| {
+                        document.id == request.document_id
+                            && (request.profile_id.is_empty()
+                                || document.profile_id == request.profile_id)
+                    })
+                    .context("Document is not in this profile")?;
+                Ok(
+                    json!({"id":document.id,"title":document.title,"text":document.text,"profile_id":document.profile_id,"created_at":document.created_at,"updated_at":document.updated_at}),
+                )
+            }
+            "document_save" => {
+                let id = if request.document_id.is_empty() {
+                    workspace_id()?
+                } else {
+                    request.document_id.clone()
+                };
+                let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+                self.change_workspace(|data| {
+                    if request.document_id.is_empty() {
+                        data.documents.push(Document {
+                            id: id.clone(),
+                            title: request.title.trim().to_owned(),
+                            text: request.text.clone(),
+                            profile_id: request.profile_id.clone(),
+                            created_at: now,
+                            updated_at: now,
+                        });
+                    } else {
+                        let document = data
+                            .documents
+                            .iter_mut()
+                            .find(|document| document.id == id)
+                            .context("Document no longer exists")?;
+                        document.title = request.title.trim().to_owned();
+                        document.text = request.text.clone();
+                        document.profile_id = request.profile_id.clone();
+                        document.updated_at = now.max(document.created_at);
+                    }
+                    Ok(())
+                })?;
+                Ok(json!({"saved":true,"id":id}))
+            }
+            "document_delete" => {
+                self.change_workspace(|data| {
+                    let index = data
+                        .documents
+                        .iter()
+                        .position(|document| {
+                            document.id == request.document_id
+                                && (request.profile_id.is_empty()
+                                    || document.profile_id == request.profile_id)
+                        })
+                        .context("Document is not in this profile")?;
+                    data.documents.remove(index);
+                    Ok(())
+                })?;
+                Ok(json!({"saved":true}))
             }
             "generate" => {
                 self.vault()?;
@@ -172,25 +444,22 @@ impl Session {
                     .context("Key options are required")?;
                 let (cert, armor) = pgp::generate_with_options(options, &request.password)?;
                 let fingerprint = cert.fingerprint().to_hex();
-                // A generated key and its emergency ticket commit in one snapshot.
-                let vault = self.vault.as_mut().context("Vault is locked")?;
-                vault.data.certificates.push(pgp::encode(&cert)?.to_vec());
-                vault.data.revocations.push(RevocationTicket {
-                    fingerprint: fingerprint.clone(),
-                    armor,
-                });
-                if let Err(error) = vault.save() {
-                    if let Some(mut bytes) = vault.data.certificates.pop() {
-                        bytes.zeroize();
-                    }
-                    vault.data.revocations.pop();
-                    return Err(error);
-                }
+                // Key, recovery ticket and selected-profile membership commit together.
+                let encoded = pgp::encode(&cert)?;
+                self.change_workspace(|data| {
+                    Self::add_profile_member(data, &request.profile_id, &fingerprint)?;
+                    data.certificates.push(encoded.to_vec());
+                    data.revocations.push(RevocationTicket {
+                        fingerprint: fingerprint.clone(),
+                        armor,
+                    });
+                    Ok(())
+                })?;
                 Ok(json!({"saved":true,"fingerprint":fingerprint}))
             }
             "import" => {
                 self.vault()?;
-                self.store(pgp::parse(request.text.as_bytes())?)?;
+                self.store(pgp::parse(request.text.as_bytes())?, &request.profile_id)?;
                 Ok(json!({"saved":true}))
             }
             "public_export" => {
@@ -239,7 +508,7 @@ impl Session {
                     &request.password,
                     &request.new_password,
                 )?;
-                self.store(updated)?;
+                self.store(updated, "")?;
                 Ok(json!({"saved":true}))
             }
             "private_export" => {
@@ -366,7 +635,7 @@ impl Session {
                 )
             }
             "encrypt" => {
-                let all = self.certs()?;
+                let all = self.certs_for_profile(&request.profile_id)?;
                 ensure!(
                     !request.recipients.is_empty(),
                     "Select recipients on the notepad"
@@ -376,7 +645,7 @@ impl Session {
                         .recipients
                         .iter()
                         .all(|fp| all.iter().any(|c| c.fingerprint().to_hex() == *fp)),
-                    "Unknown recipient selected"
+                    "Recipient is not in this profile"
                 );
                 let selected: Vec<_> = all
                     .into_iter()
@@ -391,19 +660,27 @@ impl Session {
                     &request.fingerprint
                 };
                 let cert = self
-                    .certs()?
+                    .certs_for_profile(&request.profile_id)?
                     .into_iter()
                     .find(|c| c.fingerprint().to_hex() == *fingerprint)
                     .context("Choose a signing key")?;
                 Ok(json!({"text":pgp::sign(&request.text,&cert,&request.password)?}))
             }
             "decrypt" | "verify" => {
+                let certs = self.certs_for_profile(&request.profile_id)?;
                 let opened = if request.op == "decrypt" {
-                    pgp::decrypt(&request.text, self.certs()?, &request.password)?
+                    pgp::decrypt(&request.text, certs.clone(), &request.password)?
                 } else {
-                    pgp::verify(&request.text, self.certs()?)?
+                    pgp::verify(&request.text, certs.clone())?
                 };
-                Ok(json!({"text":opened.text.as_str(),"signers":opened.signers}))
+                let policy = StandardPolicy::new();
+                let signer_details=opened.signers.iter().map(|fingerprint| {
+                    let identities=certs.iter().find(|cert|cert.fingerprint().to_hex()==*fingerprint).and_then(|cert|cert.with_policy(&policy,None).ok()).map(|valid|valid.userids().revoked(false).map(|userid|String::from_utf8_lossy(userid.userid().value()).into_owned()).collect::<Vec<_>>()).unwrap_or_default();
+                    json!({"fingerprint":fingerprint,"key_id":fingerprint.get(fingerprint.len().saturating_sub(16)..).unwrap_or(fingerprint),"identities":identities})
+                }).collect::<Vec<_>>();
+                Ok(
+                    json!({"text":opened.text.as_str(),"signers":opened.signers,"signer_details":signer_details}),
+                )
             }
             "notes_get" => Ok(json!({"text":self.vault()?.data.notes})),
             "notes_set" => {
@@ -443,9 +720,16 @@ pub fn run(mut input: impl BufRead, mut output: impl Write) -> Result<()> {
             "Invalid IPC frame"
         );
         let request: Request = serde_json::from_slice(&frame).context("Invalid IPC request")?;
+        let mut stop_after_reply = false;
         let result = match session.handle(&request) {
             Ok(data) => json!({"id":request.id,"ok":true,"data":data}),
             Err(error) => {
+                stop_after_reply = error
+                    .chain()
+                    .any(|cause| cause.is::<crate::duress::DestructionTriggered>());
+                if stop_after_reply {
+                    session.vault = None;
+                }
                 let code = if error
                     .chain()
                     .any(|cause| cause.is::<crate::vault::SaveCommitted>())
@@ -471,7 +755,7 @@ pub fn run(mut input: impl BufRead, mut output: impl Write) -> Result<()> {
         output.write_all(&bytes)?;
         output.write_all(b"\n")?;
         output.flush()?;
-        if request.op == "lock" {
+        if request.op == "lock" || stop_after_reply {
             return Ok(());
         }
     }

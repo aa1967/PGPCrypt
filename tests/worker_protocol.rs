@@ -57,6 +57,43 @@ impl Drop for Peer {
 }
 
 #[test]
+fn largest_escaped_document_roundtrips_through_private_ipc() -> Result<()> {
+    for format in ["age", "kdbx"] {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("escaped-document.age");
+        let mut peer = Peer::new()?;
+        peer.ok(
+            "create",
+            json!({"path":path,"password":"disposable large document password","format":format}),
+        )?;
+        // JSON doubles this valid document to 8 MiB plus its envelope. The private
+        // protocol must accept it without relaxing the document or vault bounds.
+        let text = "\n".repeat(4 * 1024 * 1024);
+        let id = peer.ok(
+            "document_save",
+            json!({"title":"Whitespace document","text":text}),
+        )?["id"]
+            .clone();
+        assert_eq!(
+            peer.ok("document_get", json!({"document_id":id}))?["text"],
+            text
+        );
+        peer.ok("lock", json!({}))?;
+        assert!(peer.child.wait()?.success());
+        let mut reopened = Peer::new()?;
+        reopened.ok(
+            "open",
+            json!({"path":path,"password":"disposable large document password"}),
+        )?;
+        assert_eq!(
+            reopened.ok("document_get", json!({"document_id":id}))?["text"],
+            text
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn worker_vault_workflow_and_private_key_boundary() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let path = directory.path().join("worker.pgpvault");
@@ -513,6 +550,252 @@ fn qrexec_adapter_refuses_unbound_services_and_request_privileges() -> Result<()
         let result: Value = serde_json::from_slice(&output.stdout)?;
         assert_eq!(result["ok"], false);
         assert!(!String::from_utf8_lossy(&output.stdout).contains("/tmp/private"));
+    }
+    Ok(())
+}
+
+#[test]
+fn profiles_scope_keys_and_documents_survive_conversion_without_plaintext_files() -> Result<()> {
+    for format in ["age", "kdbx"] {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join(format!("workspace.{format}"));
+        let other = if format == "age" { "kdbx" } else { "age" };
+        let copy = dir.path().join(format!("copy.{other}"));
+        let password = "disposable workspace vault password";
+        let mut peer = Peer::new()?;
+        peer.ok(
+            "create",
+            json!({"path":path,"password":password,"format":format}),
+        )?;
+        assert_eq!(peer.ok("profiles_list", json!({}))?["profiles"], json!([]));
+        assert_eq!(
+            peer.ok("documents_list", json!({}))?["documents"],
+            json!([])
+        );
+        let profile = peer.ok("profile_save", json!({"profile_name":"Personal"}))?["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let work_profile = peer.ok("profile_save", json!({"profile_name":"Work"}))?["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        for (name, assigned) in [
+            ("Personal identity", &profile),
+            ("Work identity", &work_profile),
+        ] {
+            peer.ok("generate",json!({"profile_id":assigned,"key_options":{
+                "name":name,"algorithm":"cv25519","layout":"subkeys","signing":true,
+                "certification":true,"transport_encryption":true,"storage_encryption":true,"expires_at":null
+            }}))?;
+        }
+        let list = peer.ok("list", json!({}))?;
+        let personal = list["keys"][0]["fingerprint"].as_str().unwrap().to_owned();
+        let work = list["keys"][1]["fingerprint"].as_str().unwrap().to_owned();
+        let memberships = peer.ok("profiles_list", json!({}))?["profiles"].clone();
+        assert_eq!(memberships[0]["fingerprints"], json!([personal]));
+        assert_eq!(memberships[1]["fingerprints"], json!([work]));
+        let public = peer.ok("public_export", json!({"fingerprint":personal}))?["text"].clone();
+        peer.ok(
+            "profile_save",
+            json!({"profile_id":profile,"profile_name":"Personal","profile_fingerprints":[]}),
+        )?;
+        peer.ok("import", json!({"profile_id":profile,"text":public}))?;
+        assert_eq!(
+            peer.ok("profiles_list", json!({}))?["profiles"][0]["fingerprints"],
+            json!([personal]),
+            "import must join the selected profile"
+        );
+        for invalid in [
+            json!({"profile_name":"all"}),
+            json!({"profile_name":"+"}),
+            json!({"profile_name":"personal"}),
+            json!({"profile_name":"Missing key","profile_fingerprints":["missing"]}),
+            json!({"profile_name":"Duplicate member","profile_fingerprints":[personal,personal]}),
+        ] {
+            assert_eq!(peer.raw("profile_save", invalid)?["ok"], false);
+        }
+        assert_eq!(
+            peer.raw("profile_delete", json!({"profile_id":""}))?["ok"],
+            false
+        );
+        let list = peer.ok("list", json!({}))?;
+        assert_eq!(
+            list["keys"].as_array().unwrap().len(),
+            2,
+            "list retains all keys for profile management"
+        );
+        assert_eq!(list["profiles"].as_array().unwrap().len(), 2);
+        peer.ok("settings_set", json!({"default_signing_key":work}))?;
+        assert_eq!(
+            peer.raw(
+                "sign",
+                json!({"profile_id":profile,"text":"profile fixture"})
+            )?["ok"],
+            false,
+            "hidden default must not sign"
+        );
+        assert_eq!(
+            peer.raw(
+                "sign",
+                json!({"profile_id":profile,"fingerprint":work,"text":"profile fixture"})
+            )?["ok"],
+            false
+        );
+        let signed = peer.ok(
+            "sign",
+            json!({"profile_id":profile,"fingerprint":personal,"text":"profile fixture"}),
+        )?;
+        let verified = peer.ok(
+            "verify",
+            json!({"profile_id":profile,"text":signed["text"]}),
+        )?;
+        assert_eq!(verified["signer_details"][0]["fingerprint"], personal);
+        assert_eq!(
+            verified["signer_details"][0]["identities"],
+            json!(["Personal identity"])
+        );
+        assert_eq!(
+            verified["signer_details"][0]["key_id"],
+            personal[personal.len() - 16..]
+        );
+        assert_eq!(
+            peer.raw(
+                "verify",
+                json!({"profile_id":work_profile,"text":signed["text"]})
+            )?["ok"],
+            false
+        );
+        assert_eq!(
+            peer.raw(
+                "encrypt",
+                json!({"profile_id":profile,"recipients":[work],"text":"outside profile"})
+            )?["ok"],
+            false
+        );
+        let encrypted = peer.ok(
+            "encrypt",
+            json!({"profile_id":profile,"recipients":[personal],"text":"inside profile"}),
+        )?;
+        assert_eq!(
+            peer.raw(
+                "decrypt",
+                json!({"profile_id":work_profile,"text":encrypted["text"]})
+            )?["ok"],
+            false
+        );
+        assert_eq!(
+            peer.ok(
+                "decrypt",
+                json!({"profile_id":profile,"text":encrypted["text"]})
+            )?["text"],
+            "inside profile"
+        );
+        let body = "Saved inside encrypted vault — not a plaintext message file";
+        let document = peer.ok(
+            "document_save",
+            json!({"profile_id":profile,"title":"Private message","text":body}),
+        )?["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_eq!(
+            peer.ok("documents_list", json!({"profile_id":work_profile}))?["documents"],
+            json!([])
+        );
+        assert_eq!(
+            peer.ok("documents_list", json!({"profile_id":profile}))?["documents"][0]["id"],
+            document
+        );
+        assert!(
+            peer.ok("documents_list", json!({}))?["documents"][0]
+                .get("text")
+                .is_none()
+        );
+        assert_eq!(
+            peer.raw(
+                "document_get",
+                json!({"profile_id":work_profile,"document_id":document})
+            )?["ok"],
+            false
+        );
+        assert_eq!(
+            peer.ok(
+                "document_get",
+                json!({"profile_id":profile,"document_id":document})
+            )?["text"],
+            body
+        );
+        for invalid in [
+            json!({"document_id":document,"title":"Private message","text":"invalid\u{0000} text"}),
+            json!({"title":"Missing profile","text":"not saved","profile_id":"missing"}),
+            json!({"title":"","text":"not saved"}),
+        ] {
+            assert_eq!(peer.raw("document_save", invalid)?["ok"], false);
+        }
+        assert_eq!(
+            peer.ok("document_get", json!({"document_id":document}))?["text"],
+            body,
+            "failed updates must roll back"
+        );
+        let ciphertext = std::fs::read(&path)?;
+        assert!(
+            !ciphertext
+                .windows(body.len())
+                .any(|bytes| bytes == body.as_bytes())
+        );
+        peer.ok(
+            "convert_copy",
+            json!({"path":copy,"password":password,"format":other}),
+        )?;
+        assert_eq!(std::fs::read(&path)?, ciphertext);
+        peer.ok("lock", json!({}))?;
+        assert!(peer.child.wait()?.success());
+        let mut portable = Peer::new()?;
+        portable.ok("open", json!({"path":copy,"password":password}))?;
+        assert_eq!(
+            portable.ok("profiles_list", json!({}))?["profiles"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            portable.ok("document_get", json!({"document_id":document}))?["text"],
+            body
+        );
+        portable.ok("profile_delete", json!({"profile_id":profile}))?;
+        assert_eq!(
+            portable.ok("document_get", json!({"document_id":document}))?["profile_id"],
+            "",
+            "profile deletion retains documents unassigned"
+        );
+        assert_eq!(
+            portable.ok("list", json!({}))?["keys"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2,
+            "profile deletion must retain keys"
+        );
+        portable.ok("document_delete", json!({"document_id":document}))?;
+        // A later save must not resurrect a removed document from retained KDBX state.
+        portable.ok("notes_set", json!({"text":"later managed save"}))?;
+        portable.ok("lock", json!({}))?;
+        assert!(portable.child.wait()?.success());
+        let mut reopened = Peer::new()?;
+        reopened.ok("open", json!({"path":copy,"password":password}))?;
+        assert_eq!(
+            reopened.ok("documents_list", json!({}))?["documents"],
+            json!([])
+        );
+        assert_eq!(
+            reopened.ok("profiles_list", json!({}))?["profiles"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
     Ok(())
 }

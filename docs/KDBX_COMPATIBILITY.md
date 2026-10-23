@@ -55,10 +55,17 @@ packets inside the encrypted container; take care when copying those packets out
 
 The `Vault notes and settings` entry holds the protected `Notes` field and
 `PGPCrypt.IdleTimeoutSeconds`, plus protected `PGPCrypt.DefaultSigningKey`
-(empty means no default). The settings entry uses `PGPCrypt.Schema=3`; key
-entries remain schema 1. Alpha7 reads older settings with defaults for missing fields. Protected
+(empty means no default). The settings entry uses `PGPCrypt.Schema=4`; key
+entries remain schema 1. Older settings are read with defaults for missing fields. Protected
 `PGPCrypt.Preferences` holds JSON for themes, locking, clipboard clearing and
 Qubes opt-in; all new automatic behaviors default off.
+Protected `PGPCrypt.Profiles` contains profile IDs, names and key memberships as
+JSON. Saved text documents are ordinary entries in the PGPCrypt group with
+`PGPCrypt.Type=document`, `PGPCrypt.Schema=1`, Title, protected Notes, and
+`PGPCrypt.DocumentId`, `PGPCrypt.ProfileId`, `PGPCrypt.CreatedAt` and
+`PGPCrypt.UpdatedAt`. Read or copy their Notes in KeePassXC. Existing document
+IDs and structural fields must remain valid. Deleted managed documents are
+removed on save; supported unrelated entries outside the group remain intact.
 Older PGPCrypt versions reject the new settings schema; KeePassXC can still
 open the standard database. Structural markers and fingerprints must agree;
 duplicate settings, duplicate fingerprints and unknown entries inside this
@@ -86,7 +93,9 @@ unchanged. No plaintext temporary file is created. The current session continues
 using the original; lock and open the destination to switch.
 
 Conversion copies saved PGPCrypt keys (including encrypted private packets),
-revocations, retained notes, idle timeout, default signing key and preferences. Unrelated KeePass entries, history and other
+revocations, retained notes, idle timeout, default signing key, preferences,
+profiles and saved documents. Optional protection records and triggers are configured separately for each
+destination and are not copied. Unrelated KeePass entries, history and other
 KeePass-only information are not part of an age vault and stay in the source.
 Keep the source until you have opened and checked the destination. Conversion
 is not secure deletion of the original or any backup.

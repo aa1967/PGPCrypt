@@ -94,25 +94,33 @@ def main():
             "storage_encryption": True, "expires_at": None,
         })
         fingerprint = peer.request("list")["keys"][0]["fingerprint"]
+        profile = peer.request("profile_save", profile_name="Independent age profile", profile_fingerprints=[fingerprint])["id"]
+        document = peer.request("document_save", title="Portable text", text="Stored inside the age vault", profile_id=profile)["id"]
         peer.request("notes_set", text="independent age compatibility fixture")
         peer.lock()
 
         terminal_command([age, "--decrypt", "--output", str(plaintext), str(original)])
         decoded = json.loads(plaintext.read_text())
-        assert decoded["application"] == "PGPCrypt" and decoded["schema"] == 4
+        assert decoded["application"] == "PGPCrypt" and decoded["schema"] == 5
         assert decoded["data"]["notes"] == "independent age compatibility fixture"
         assert len(decoded["data"]["certificates"]) == 1
+        assert decoded["data"]["profiles"][0]["id"] == profile
+        assert decoded["data"]["documents"][0]["text"] == "Stored inside the age vault"
 
         terminal_command([age, "--passphrase", "--output", str(external), str(plaintext)])
         peer = Peer()
         peer.request("open", path=str(external), password=PASS)
         assert peer.request("notes_get")["text"] == decoded["data"]["notes"]
         assert peer.request("list")["keys"][0]["fingerprint"] == fingerprint
+        assert peer.request("document_get", document_id=document, profile_id=profile)["text"] == "Stored inside the age vault"
         peer.lock()
         # Recreate the previous age schemas using the independent writer.
-        for schema in (3, 2, 1):
+        for schema in (4, 3, 2, 1):
             decoded["schema"] = schema
-            decoded["data"].pop("preferences", None)
+            decoded["data"].pop("profiles", None)
+            decoded["data"].pop("documents", None)
+            if schema < 4:
+                decoded["data"].pop("preferences", None)
             if schema < 3:
                 decoded["data"].pop("default_signing_key", None)
             if schema == 1:
@@ -126,8 +134,10 @@ def main():
             assert settings["default_signing_key"] == ""
             assert settings["preferences"]["auto_lock"] is False
             assert peer.request("list")["keys"][0]["fingerprint"] == fingerprint
+            assert peer.request("profiles_list")["profiles"] == []
+            assert peer.request("documents_list")["documents"] == []
             peer.lock()
-    print("age interoperability passed: Rust vault -> Debian age -> Rust vault; schemas 1/2/3/4")
+    print("age interoperability passed: Rust vault -> Debian age -> Rust vault; profiles/documents and schemas 1/2/3/4/5")
 
 
 if __name__ == "__main__":

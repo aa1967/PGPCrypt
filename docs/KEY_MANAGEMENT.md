@@ -1,6 +1,6 @@
 # OpenPGP keys
 
-Use **Keys & identities → New identity → Create key**. A name or pseudonym is
+Use **Keys → New identity → Create key**. A name or pseudonym is
 required. Email and public comment are optional. The comment is part of the
 exported identity; keep private annotations in encrypted vault notes instead.
 
@@ -97,11 +97,13 @@ The start screen offers Create vault, Open vault, and Quit. Create pre-fills
 shows a local zxcvbn strength estimate while typing. A minimum of 16 characters
 still applies regardless of the estimate. Open uses a file browser and requests
 only the existing vault's password/passphrase. Browse also selects a different
-save location. No recent-vault list or Qt file-dialog history is saved.
+save location. Recent vaults can open the password screen directly; disable
+remembering in Settings to clear their local paths. Qt file-dialog history
+remains disabled.
 
 ## Subkeys (alpha7)
 
-Select a key on **Keys & identities**, then **Manage subkeys…**. The inspector
+Select a key on **Keys**, then **Manage subkeys…**. The inspector
 shows primary/subkey fingerprints, algorithms, capabilities, expiration and
 status. Public-only certificates can be inspected; adding a subkey requires the
 primary private key and certification capability.
@@ -137,12 +139,10 @@ can be normalized. Use another established OpenPGP tool for detached signatures
 on files whose exact bytes must be preserved; that file workflow is not yet
 implemented here.
 
-**Open message…** browses ordinary UTF-8 text/armored message files (up to 4 MiB)
-and loads the input. Encrypt/Sign accept up to 1 MiB of plaintext. **Save output…** writes the result to a chosen file (up to
-4 MiB). Saving a decrypted message writes plaintext outside the vault, and the
-app asks before doing so. These files are not embedded in or protected by the
-vault unless the saved result itself is OpenPGP encrypted. Saving uses an atomic
-replacement and private file permissions. No recent-file list is stored.
+Notepad now separates **Save to vault** from external **Import/Export**.
+Saved documents live inside vault encryption and appear in its document browser;
+opening an external file only loads text until an explicit save. See
+[the workspace guide](WORKSPACE.md) for profiles, verification labels and files.
 
 For certificates containing several signing keys, unprotected usable signing
 secrets are tried first; otherwise the supplied password is tried against usable

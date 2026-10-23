@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     cell::RefCell,
+    collections::HashSet,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     os::unix::fs::OpenOptionsExt,
@@ -18,7 +19,7 @@ const PAD: usize = 4096;
 // Set an explicit cost independent of compiler optimization/hardware calibration.
 const WORK_FACTOR: u8 = 18;
 
-#[derive(Default, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Default, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 #[serde(deny_unknown_fields)]
 pub struct RevocationTicket {
     pub fingerprint: String,
@@ -79,7 +80,43 @@ impl Preferences {
     }
 }
 
-#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
+pub struct Profile {
+    pub id: String,
+    pub name: String,
+    pub fingerprints: Vec<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
+pub struct Document {
+    pub id: String,
+    pub title: String,
+    pub text: String,
+    pub profile_id: String,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+pub fn workspace_id() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    sequoia_openpgp::crypto::random(&mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+fn valid_workspace_id(id: &str) -> bool {
+    id.len() == 32
+        && id
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+}
+
+fn valid_label(label: &str, max: usize) -> bool {
+    !label.trim().is_empty() && label.chars().count() <= max && !label.chars().any(char::is_control)
+}
+
+#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 #[serde(deny_unknown_fields)]
 pub struct VaultData {
     pub certificates: Vec<Vec<u8>>,
@@ -92,6 +129,10 @@ pub struct VaultData {
     pub default_signing_key: String,
     #[serde(default)]
     pub preferences: Preferences,
+    #[serde(default)]
+    pub profiles: Vec<Profile>,
+    #[serde(default)]
+    pub documents: Vec<Document>,
 }
 
 fn default_timeout() -> u32 {
@@ -107,7 +148,95 @@ impl Default for VaultData {
             idle_timeout_seconds: default_timeout(),
             default_signing_key: String::new(),
             preferences: Preferences::default(),
+            profiles: Vec::new(),
+            documents: Vec::new(),
         }
+    }
+}
+
+impl VaultData {
+    pub fn validate(&self) -> Result<()> {
+        self.preferences.validate()?;
+        ensure!(
+            (60..=3600).contains(&self.idle_timeout_seconds),
+            "Unsupported idle timeout"
+        );
+        ensure!(
+            self.profiles.len() <= 64,
+            "A vault supports at most 64 profiles"
+        );
+        ensure!(
+            self.documents.len() <= 1024,
+            "A vault supports at most 1024 documents"
+        );
+        let fingerprints = self
+            .certificates
+            .iter()
+            .map(|bytes| crate::pgp::parse(bytes).map(|c| c.fingerprint().to_hex()))
+            .collect::<Result<HashSet<_>>>()?;
+        let mut ids = HashSet::new();
+        let mut names = HashSet::new();
+        for profile in &self.profiles {
+            ensure!(
+                valid_workspace_id(&profile.id) && ids.insert(profile.id.as_str()),
+                "Invalid or duplicate profile ID"
+            );
+            ensure!(
+                valid_label(&profile.name, 80)
+                    && !profile.name.eq_ignore_ascii_case("all")
+                    && profile.name != "+"
+                    && names.insert(profile.name.to_lowercase()),
+                "Profile names must be unique, 1–80 characters, and different from All or +"
+            );
+            let mut members = HashSet::new();
+            ensure!(
+                profile
+                    .fingerprints
+                    .iter()
+                    .all(|fp| fingerprints.contains(fp) && members.insert(fp)),
+                "Profile contains a missing or duplicate key"
+            );
+        }
+        let mut document_ids = HashSet::new();
+        let mut text_bytes = 0usize;
+        for document in &self.documents {
+            ensure!(
+                valid_workspace_id(&document.id) && document_ids.insert(document.id.as_str()),
+                "Invalid or duplicate document ID"
+            );
+            ensure!(
+                valid_label(&document.title, 120),
+                "Document titles must contain 1–120 characters without control characters"
+            );
+            ensure!(
+                document.text.len() <= 4 * 1024 * 1024,
+                "Document exceeds 4 MiB"
+            );
+            ensure!(
+                document
+                    .text
+                    .chars()
+                    .all(|c| matches!(c, '\t' | '\n' | '\r')
+                        || (c >= ' ' && c != '\u{fffe}' && c != '\u{ffff}')),
+                "Document contains control characters unsupported by portable KDBX text"
+            );
+            ensure!(
+                document.profile_id.is_empty() || ids.contains(document.profile_id.as_str()),
+                "Document refers to a missing profile"
+            );
+            ensure!(
+                document.created_at > 0 && document.updated_at >= document.created_at,
+                "Invalid document timestamps"
+            );
+            text_bytes = text_bytes
+                .checked_add(document.text.len())
+                .context("Documents are too large")?;
+            ensure!(
+                text_bytes <= MAX_SIZE,
+                "Saved documents exceed the vault size limit"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -160,6 +289,7 @@ pub struct Vault {
     // Ciphertext is not secret. Keep the exact bytes last opened or saved so a
     // non-cooperating editor (for example KeePassXC) cannot silently lose a save.
     encrypted_snapshot: RefCell<Vec<u8>>,
+    read_only: bool,
 }
 
 /// The atomic replacement succeeded, but its directory sync failed. Callers
@@ -171,7 +301,7 @@ impl std::fmt::Display for SaveCommitted {
     fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             output,
-            "Vault saved, but storage durability could not be confirmed. Reopen the vault and keep a backup: {}",
+            "Vault saved, but storage updates could not be completed. Reopen it and check Settings: {}",
             self.0
         )
     }
@@ -243,6 +373,26 @@ impl Vault {
             "Use at least 16 characters; prefer randomly chosen words"
         );
         let path = resolve(path)?;
+        for record in [
+            crate::protection::sidecar_path(&path),
+            crate::duress::sidecar_path(&path),
+            crate::duress::dummy_sidecar_path(&path),
+            crate::expiry::sidecar_path(&path),
+        ] {
+            match fs::symlink_metadata(&record) {
+                Ok(_) => bail!(
+                    "Protection companion files already exist for this name; choose a different vault filename"
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(file_error(
+                        error,
+                        "check protection companion files",
+                        &record,
+                    ));
+                }
+            }
+        }
         match fs::symlink_metadata(&path) {
             Ok(metadata) if metadata.is_dir() => {
                 bail!("Choose a vault filename inside the folder, not the folder itself")
@@ -270,6 +420,7 @@ impl Vault {
             format,
             kdbx: None,
             encrypted_snapshot: RefCell::new(Vec::new()),
+            read_only: false,
         };
         vault.write(true)?;
         Ok(vault)
@@ -310,6 +461,7 @@ impl Vault {
                 format: VaultFormat::Kdbx,
                 kdbx: Some(Box::new(db)),
                 encrypted_snapshot: RefCell::new(bytes),
+                read_only: false,
             });
         }
         let decryptor = age::Decryptor::new_buffered(bytes.as_slice())
@@ -335,14 +487,14 @@ impl Vault {
         // No decoded data is exposed until the complete age stream authenticates.
         let stored: Stored = serde_json::from_slice(&plaintext).context("Invalid vault schema")?;
         ensure!(
-            stored.application == "PGPCrypt" && matches!(stored.schema, 1..=4),
+            stored.application == "PGPCrypt" && matches!(stored.schema, 1..=5),
             "Unsupported vault schema"
         );
         ensure!(
             (60..=3600).contains(&stored.data.idle_timeout_seconds),
             "Unsupported idle timeout"
         );
-        stored.data.preferences.validate()?;
+        stored.data.validate()?;
         Ok(Self {
             data: stored.data,
             path,
@@ -351,11 +503,141 @@ impl Vault {
             format: VaultFormat::Age,
             kdbx: None,
             encrypted_snapshot: RefCell::new(bytes),
+            read_only: false,
         })
+    }
+
+    /// An empty view only: never decrypt the real payload or retain its password.
+    /// The caller must first verify the separately configured dummy password.
+    pub fn open_empty_read_only(path: &Path) -> Result<Self> {
+        let path = resolve(path)?;
+        let lock = acquire_lock(&path)?;
+        let mut file = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(&path)?;
+        ensure!(file.metadata()?.is_file(), "Choose a regular vault file");
+        let mut bytes = Vec::new();
+        Read::by_ref(&mut file)
+            .take((MAX_ENCRYPTED + 1) as u64)
+            .read_to_end(&mut bytes)?;
+        ensure!(bytes.len() <= MAX_ENCRYPTED, "Oversized vault");
+        let format = if bytes.starts_with(crate::kdbx::MAGIC) {
+            VaultFormat::Kdbx
+        } else {
+            ensure!(
+                bytes.starts_with(b"age-encryption.org/v1"),
+                "Vault cannot be opened; it may be damaged"
+            );
+            VaultFormat::Age
+        };
+        Ok(Self {
+            data: VaultData::default(),
+            path,
+            passphrase: SecretString::from(String::new()),
+            _lock: lock,
+            format,
+            kdbx: None,
+            encrypted_snapshot: RefCell::new(bytes),
+            read_only: true,
+        })
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
+    }
+
+    pub fn protection_enabled(&self) -> Result<bool> {
+        crate::protection::enabled(&self.path)
+    }
+
+    pub fn protection_enable(&self) -> Result<()> {
+        ensure!(!self.read_only, "Vault is read-only");
+        self.check_unchanged()?;
+        crate::protection::enable(&self.path)
+    }
+
+    pub fn protection_disable(&self) -> Result<()> {
+        ensure!(!self.read_only, "Vault is read-only");
+        crate::protection::disable(&self.path)
+    }
+
+    pub fn expiry_status(&self) -> Result<crate::expiry::Status> {
+        crate::expiry::status(&self.path, &self.encrypted_snapshot.borrow())
+    }
+
+    pub fn expiry_configure(&self, count: u32, unit: &str, now: u64) -> Result<()> {
+        ensure!(!self.read_only, "Vault is read-only");
+        self.check_unchanged()?;
+        crate::expiry::configure(
+            &self.path,
+            &self.encrypted_snapshot.borrow(),
+            count,
+            unit,
+            now,
+        )
+    }
+
+    pub fn expiry_disable(&self) -> Result<()> {
+        ensure!(!self.read_only, "Vault is read-only");
+        crate::expiry::disable(&self.path)
+    }
+
+    pub fn record_normal_open(&self, now: u64) -> Result<()> {
+        ensure!(!self.read_only, "Vault is read-only");
+        crate::expiry::record_normal_open(&self.path, &self.encrypted_snapshot.borrow(), now)
     }
 
     pub fn format(&self) -> VaultFormat {
         self.format
+    }
+
+    pub fn emergency_status(&self) -> Result<crate::duress::Status> {
+        crate::duress::status(&self.path, &self.encrypted_snapshot.borrow())
+    }
+
+    pub fn emergency_configure(&self, password: &str) -> Result<()> {
+        use age::secrecy::ExposeSecret;
+        ensure!(!self.read_only, "Vault is read-only");
+        ensure!(
+            password != self.passphrase.expose_secret(),
+            "Choose an emergency password different from the vault password"
+        );
+        self.check_unchanged()?;
+        ensure!(
+            !crate::duress::dummy_matches(&self.path, password)?,
+            "Choose different emergency and dummy passwords"
+        );
+        crate::duress::configure(&self.path, &self.encrypted_snapshot.borrow(), password)
+    }
+
+    pub fn emergency_disable(&self) -> Result<()> {
+        ensure!(!self.read_only, "Vault is read-only");
+        crate::duress::disable(&self.path)
+    }
+
+    pub fn dummy_status(&self) -> Result<crate::duress::Status> {
+        crate::duress::dummy_status(&self.path, &self.encrypted_snapshot.borrow())
+    }
+
+    pub fn dummy_configure(&self, password: &str) -> Result<()> {
+        use age::secrecy::ExposeSecret;
+        ensure!(!self.read_only, "Vault is read-only");
+        ensure!(
+            password != self.passphrase.expose_secret(),
+            "Choose a dummy password different from the vault password"
+        );
+        self.check_unchanged()?;
+        ensure!(
+            !crate::duress::emergency_matches(&self.path, password)?,
+            "Choose different emergency and dummy passwords"
+        );
+        crate::duress::dummy_configure(&self.path, &self.encrypted_snapshot.borrow(), password)
+    }
+
+    pub fn dummy_disable(&self) -> Result<()> {
+        ensure!(!self.read_only, "Vault is read-only");
+        crate::duress::dummy_disable(&self.path)
     }
 
     /// Write a distinct encrypted destination; never alter the source.
@@ -366,6 +648,7 @@ impl Vault {
         password: &str,
         format: VaultFormat,
     ) -> Result<()> {
+        ensure!(!self.read_only, "Vault is read-only");
         ensure!(
             resolve(destination)? != self.path,
             "Choose a different destination; the source is never replaced"
@@ -398,12 +681,14 @@ impl Vault {
     }
 
     fn write(&self, create: bool) -> Result<()> {
+        ensure!(!self.read_only, "Vault is read-only");
+        self.data.validate()?;
         if !create {
             self.check_unchanged()?;
         }
         let mut plaintext = Zeroizing::new(serde_json::to_vec(&StoredRef {
             application: "PGPCrypt",
-            schema: 4,
+            schema: 5,
             data: &self.data,
         })?);
         let size = plaintext.len().div_ceil(PAD) * PAD;
@@ -456,8 +741,22 @@ impl Vault {
             temp.persist(&self.path)
                 .map_err(|e| file_error(e.error, "replace the encrypted vault file", &self.path))?;
         }
-        *self.encrypted_snapshot.borrow_mut() = encrypted;
+        let previous = self.encrypted_snapshot.replace(encrypted);
         directory.sync_all().map_err(SaveCommitted)?;
+        if !create {
+            crate::duress::refresh_after_save(
+                &self.path,
+                &previous,
+                &self.encrypted_snapshot.borrow(),
+            )
+            .map_err(|error| SaveCommitted(std::io::Error::other(error.to_string())))?;
+            crate::expiry::refresh_after_save(
+                &self.path,
+                &previous,
+                &self.encrypted_snapshot.borrow(),
+            )
+            .map_err(|error| SaveCommitted(std::io::Error::other(error.to_string())))?;
+        }
         Ok(())
     }
 
@@ -477,7 +776,8 @@ mod tests {
         let path = dir.path().join("test.pgpcrypt.age");
         let mut vault = Vault::create(&path, PASS)?;
         vault.data.notes = "Alice secret metadata alice@example.invalid".into();
-        vault.data.certificates.push(b"secret key fixture".to_vec());
+        let certificate = crate::pgp::encode(&crate::pgp::generate("Secret key fixture")?)?;
+        vault.data.certificates.push(certificate.to_vec());
         vault.save()?;
         let first = fs::read(&path)?;
         assert!(first.starts_with(b"age-encryption.org/v1\n"));
@@ -497,7 +797,7 @@ mod tests {
             vault.data.notes,
             "Alice secret metadata alice@example.invalid"
         );
-        assert_eq!(vault.data.certificates[0], b"secret key fixture");
+        assert_eq!(vault.data.certificates[0], *certificate);
         drop(vault);
         for index in [24, first.len() / 2, first.len() - 1] {
             let mut damaged = first.clone();

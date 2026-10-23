@@ -104,3 +104,22 @@ Preferences (all automatic modes off initially) live in age payload schema 4
 or KDBX settings schema 3. Subkey creation uses Sequoia KeyBuilder/SubkeyBuilder
 and the primary secret to certify a binding, then commits a new ciphertext
 snapshot. The removed notes page retains existing data in both backends.
+
+## Alpha9 workspace and local state
+
+Profiles and text documents are encrypted in age schema 5 or KDBX settings
+schema 4/ordinary protected document entries. Profile filters also scope crypto
+candidate selection, but do not isolate contents within unlocked memory. The
+private GUI/worker JSON frame cap is 10 MiB to accommodate escaping a 4 MiB
+text document; the separate Qubes response bound remains 8 MiB. Verified
+identities are enriched locally and are not added to remote RPC replies.
+
+Explicit local state outside vault encryption consists of recent vault paths
+(per-device, enabled by default and clearable in Settings), and optional protection
+records (master flag, purpose-separated password verifiers and inactivity policy;
+all off by default). These store no plaintext vault passwords or PGP keys, but
+reveal paths, configured features or timestamps. Dummy sessions construct an empty
+read-only Vault without decrypting real contents. Expiry is checked before any
+vault decryption, and only successful normal worker opens reset it. Destruction
+is best-effort and cannot erase snapshots or guarantee physical erasure. See
+[WORKSPACE.md](WORKSPACE.md) and [VAULT_PROTECTION.md](VAULT_PROTECTION.md).

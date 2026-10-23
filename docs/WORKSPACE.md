@@ -1,0 +1,82 @@
+# Profiles and saved documents
+
+The workspace has four navigation buttons: **Keys**, **Notepad**, **Identities**
+and **Settings**. All data described here stays inside the encrypted age/KDBX
+vault, except files deliberately imported/exported, recent-vault paths, and
+optional protection companion records described separately.
+
+## Profiles
+
+**All** shows every key and saved document. The **+** tab creates a named profile.
+Profiles are categories: one key can belong to several, and a profile can be empty.
+Newly generated or imported keys join the selected profile automatically.
+Use **Identities** to rename profiles or change their key membership. Deleting a
+profile keeps its keys and documents; its documents become unassigned and remain
+visible under All.
+
+The selected profile filters Keys, Notepad recipients, signing choices and the
+saved-document browser. Hidden recipients are not retained as an invisible
+selection, and an unavailable default signer is not substituted. Decryption and
+verification also use keys in the selected profile; select All to search the
+whole vault. A signature from a key outside the profile cannot be verified there.
+
+Profiles do not have separate passwords or memory isolation. Unlocking the vault
+unlocks all its contents; use separate vault files when separate confidentiality
+boundaries are needed. Profile names, membership and document metadata are all
+encrypted at rest.
+
+## Notepad documents
+
+**Save output to vault** stores the output as a named encrypted document. The
+input can also be saved explicitly. Use the built-in document browser to load a
+saved document into the input, or delete a saved document. Loading does not change
+the saved copy. Editing text, pasting, importing or running crypto does not save
+automatically. Save explicitly to retain changes before locking or closing.
+
+**Import text file** reads an ordinary UTF-8 file into the input. It is stored
+inside the vault only after an explicit vault save. **Export output** writes an
+ordinary file outside the vault and asks before writing readable output. These
+are separate actions. Earlier PGPCrypt versions saved Notepad files only to the
+external filesystem; those files are not silently imported by this upgrade.
+
+Saved text may be plaintext or an armored OpenPGP artifact. The vault password
+protects either while the vault is locked. Saving plaintext in the vault does
+not sign it or encrypt it to an OpenPGP recipient. The app accepts text rather
+than binary attachments: imported messages and stored documents are at most
+4 MiB each, new Encrypt/Sign plaintext is at most 1 MiB, and the entire vault
+payload remains limited to 16 MiB.
+
+**Paste** reads the clipboard into the input. **Copy all** copies the output.
+Optional clipboard expiry follows the existing ownership rules; it cannot erase
+copies kept by clipboard managers or other Qubes.
+
+## Verification
+
+The output panel and status bar show the verified signing certificate's identity,
+certificate key ID and full fingerprint. The message editor contains only the verified text,
+so copying/saving/reprocessing it does not insert interface labels. Verification
+authenticates the signature, not the person's real-world identity. Compare the
+full fingerprint over a trusted channel.
+
+## Portable recovery
+
+age schema 5 stores `data.profiles` and `data.documents`. KDBX settings schema 4
+stores profiles in protected `PGPCrypt.Profiles` JSON. Each saved document is a
+normal KeePass entry with its title and protected `Notes` content. It can be read
+and copied in KeePassXC without PGPCrypt. Both conversion directions preserve
+profiles, membership and saved documents. Older PGPCrypt versions reject the new
+schemas; keep a backup before upgrading.
+
+## Recent vaults on this device
+
+Landing-page recent entries open that vault's password screen in one click.
+Only a successful open/create adds an entry; no password or contents are saved.
+Remembering is on by default. Disable **Remember recent vaults on this device**
+in Settings to clear stored paths and stop recording them.
+
+This is an explicit exception to keeping vault information inside encryption:
+up to five local vault paths are stored outside the vault in a private file
+under the per-user state directory. A filename/path may itself reveal an identity
+or project name. Disabling removes the current record's paths, not filesystem
+snapshots/backups of that record. Qt's automatic file-dialog history remains
+disabled; this is a separate PGPCrypt feature.
