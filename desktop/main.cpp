@@ -1688,7 +1688,7 @@ private:
         // the disposable self-test vault under isolated HOME.
         refreshProtectionStatus(); testWaitForUi([this,after] {
             if(protectionMaster || protectionOptionChecks.size()!=3 || protectionOptionControls[0]->isEnabled()) {fail("New vault protection controls were active"); return;}
-            QTimer::singleShot(0,this,[this] {auto* warning=qobject_cast<QMessageBox*>(QApplication::activeModalWidget()); if(!warning) {fail("Master protection warning missing"); return;} warning->done(QMessageBox::Yes);});
+            QTimer::singleShot(0,this,[this] {auto* warning=qobject_cast<QMessageBox*>(QApplication::activeModalWidget()); if(!warning) {fail("Master protection warning missing"); return;} warning->button(QMessageBox::Yes)->click();});
             protectionMasterCheck->setChecked(true);
             testWaitForUi([this,after] {
                 if(!protectionMaster || protectionOptionChecks[0]->isChecked() || protectionOptionControls[0]->isEnabled()) {fail("Master enable restored an option"); return;}
