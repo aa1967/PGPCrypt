@@ -52,6 +52,8 @@
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QSettings>
+#include <QScrollArea>
+#include "external_files.h"
 #include <QTabWidget>
 #include <QTabBar>
 #include <QTableWidget>
@@ -284,7 +286,8 @@ public:
         auto* clearActivity=new QPushButton("Clear"); activityHeading->addWidget(clearActivity); activityLayout->addLayout(activityHeading);
         activityLog=new SafeActivityLog; activityLayout->addWidget(activityLog); activityDock->setWidget(activityBox); addDockWidget(Qt::BottomDockWidgetArea,activityDock); activityDock->hide();
         connect(activityFilter,&QComboBox::currentIndexChanged,activityLog,[this](int index) {activityLog->setWarningsOnly(index==1);});
-        connect(clearActivity,&QPushButton::clicked,activityLog,&QPlainTextEdit::clear); vaultMenu->addAction(activityDock->toggleViewAction());
+        connect(clearActivity,&QPushButton::clicked,this,[this,activityFilter] {activityFilter->setCurrentIndex(0); resetActivity();});
+        activityClearTimer.setSingleShot(false); connect(&activityClearTimer,&QTimer::timeout,this,[this] {if(unlocked) resetActivity();}); vaultMenu->addAction(activityDock->toggleViewAction());
 
         connect(&rpcServer,&QLocalServer::newConnection,this,[this] { acceptQubes(); });
         auto* help = menuBar()->addMenu("&Help");
@@ -298,7 +301,7 @@ public:
         connect(&idle, &QTimer::timeout, this, [this] {
             const auto now = QDateTime::currentMSecsSinceEpoch();
             if (unlocked && autoLock && (activityClock.elapsed() >= idleTimeoutSeconds * 1000LL || now - lastTick > 15000 || now < lastTick)) endSession(true);
-            lastTick = now;
+            lastTick = now; updateSessionStats();
         });
         idle.setInterval(1000);
         lastTick = QDateTime::currentMSecsSinceEpoch();
@@ -353,7 +356,12 @@ private:
     QElapsedTimer activityClock;
     int idleTimeoutSeconds = 300, clipboardSeconds = 0;
     bool autoLock = false, focusLock = false, sessionLock = false, qubesEnabled = false;
-    QJsonObject preferences;
+    QJsonObject preferences, workerSecurity;
+    QTimer activityClearTimer;
+    QElapsedTimer sessionClock;
+    quint64 sessionOperations=0, failedOpens=0;
+    QLabel *sessionStats=nullptr, *memoryStatus=nullptr;
+    std::function<void()> syncSettingsControls;
     QTimer clipboardTimer, selectionTimer;
     QAction *settingsAction = nullptr, *convertAction = nullptr;
     qint64 lastTick = 0;
@@ -387,7 +395,7 @@ private:
     QPlainTextEdit* profileNotes=nullptr;
     QComboBox *identityStatus=nullptr, *keyStatus=nullptr;
     QString currentDocumentProfile;
-    QTableWidget* documents = nullptr;
+    QTableWidget *documents = nullptr, *recentDocuments = nullptr;
     QLabel *documentContext = nullptr, *verificationIdentity = nullptr;
     QPushButton *pasteInput = nullptr, *copyOutput = nullptr, *profileSaveButton = nullptr, *profileDeleteButton = nullptr;
     QList<QPushButton*> navigationButtons;
@@ -398,7 +406,7 @@ private:
     QList<QCheckBox*> protectionOptionChecks;
     QJsonObject protectionOptions;
     bool protectionMaster = false, protectionLoaded = false;
-    bool outputIsEncrypted = false, notepadPopout = true;
+    bool outputIsEncrypted = false, notepadPopout = false;
     QWidget *notepadPage=nullptr, *notepadHost=nullptr, *notepadPlaceholder=nullptr;
     QVBoxLayout* notepadHostLayout=nullptr;
     QDialog* notepadWindow=nullptr;
@@ -470,8 +478,12 @@ private:
             endSession(true,message); return;
         }
         const auto completedOperation=pendingOperation; pendingOperation.clear();
-        if(activityLog && unlocked && QStringList{"encrypt","decrypt","sign","private_export","protected_private_export","public_export","document_save","document_properties","document_get","document_delete"}.contains(completedOperation) && code!="password_required" && code!="vault_auth_required")
-            activityLog->record(!ok?ActivityEvent::OperationFailed:completedOperation=="document_save"?ActivityEvent::DocumentSaved:completedOperation=="document_get"?ActivityEvent::TextLoaded:completedOperation=="encrypt"?ActivityEvent::EncryptionComplete:completedOperation=="decrypt"?ActivityEvent::DecryptionComplete:completedOperation=="sign"?ActivityEvent::SigningComplete:ActivityEvent::OperationComplete);
+        if(completedOperation=="open" && !ok) ++failedOpens;
+        if(ok && (completedOperation=="open" || completedOperation=="create")) {workerSecurity=response.value("data").toObject().value("security").toObject(); sessionClock.start(); sessionOperations=0;}
+        const QHash<QString,ActivityEvent> events{{"generate",ActivityEvent::KeyCreated},{"import",ActivityEvent::KeyImported},{"add_subkey",ActivityEvent::SubkeyAdded},{"protect_private_key",ActivityEvent::KeyUpdated},{"settings_set",ActivityEvent::PreferencesSaved},{"document_save",ActivityEvent::DocumentSaved},{"document_get",ActivityEvent::TextLoaded},{"document_properties",ActivityEvent::DocumentChanged},{"document_delete",ActivityEvent::DocumentChanged},{"encrypt",ActivityEvent::EncryptionComplete},{"decrypt",ActivityEvent::DecryptionComplete},{"sign",ActivityEvent::SigningComplete},{"public_export",ActivityEvent::OperationComplete},{"private_export",ActivityEvent::OperationComplete},{"protected_private_export",ActivityEvent::OperationComplete}};
+        // No activity entries for password roles, protection setup or unlocks.
+        if(activityLog && unlocked && events.contains(completedOperation) && code!="password_required" && code!="vault_auth_required") {activityLog->record(ok?events.value(completedOperation):ActivityEvent::OperationFailed); if(ok) ++sessionOperations;}
+        updateSessionStats();
         if (!ok && code!="password_required" && code!="vault_auth_required" && code!="verification_failed") fail(response.value("error").toString("Operation failed"));
         else statusBar()->showMessage("Ready • Offline");
         auto data=response.value("data").toObject(); if(!ok) data.insert("_error_code",code);
@@ -486,7 +498,9 @@ private:
         if(notepadWindow) notepadWindow->hide();
         if(activityLog) {activityLog->clear();} if(activityDock) {activityDock->hide();}
         idle.stop(); rpcServer.close(); if(!rpcPath.isEmpty()) {QLocalServer::removeServer(rpcPath); rpcPath.clear();}
-        if(clipboardSeconds>0) { if(qApp->clipboard()->ownsClipboard()) qApp->clipboard()->clear(); if(qApp->clipboard()->ownsSelection()) qApp->clipboard()->clear(QClipboard::Selection); }
+        activityClearTimer.stop(); clipboardTimer.stop(); selectionTimer.stop();
+        clearSessionClipboard(); clearSessionClipboard(QClipboard::Selection);
+        if(testing && !qApp->clipboard()->text().isEmpty()) {std::fputs("Clipboard survived lock\n",stderr); qApp->exit(1); return;}
         if (process.state() != QProcess::NotRunning) {
             process.kill();
             if (!process.waitForFinished(5000)) { ending = false; idle.start(); fail("Worker could not be stopped; vault lock is not confirmed"); return; }
@@ -598,6 +612,7 @@ private:
             if(creatingVault && password->text()!=confirmation->text()) { fail("Passwords/passphrases must match"); return; }
             const auto filename = absoluteVaultPath(path->text());
             if(filename.isEmpty()) { fail("Choose a vault file"); return; }
+            if(ephemeralLocation(filename)) {fail("Choose a persistent vault folder, such as your home or Documents. Sandbox state and /tmp disappear at exit."); return;}
             path->setText(filename); lockedStatus->clear();
             QJsonObject fields{{"path",filename},{"password",password->text()}};
             if(creatingVault) fields.insert("format",formatChoice->currentData().toString());
@@ -630,7 +645,7 @@ private:
             const bool has=recentVaultList->count()>0; recentVaultList->setVisible(has); recentVaultHeading->setVisible(has); forgetRecentButton->setVisible(has);
         }
         if(rememberVaultsCheck) {QSignalBlocker block(rememberVaultsCheck); rememberVaultsCheck->setChecked(recentVaultStore.enabled && recentVaultStore.available); rememberVaultsCheck->setEnabled(recentVaultStore.available);}
-        if(recentStorageHint) recentStorageHint->setText(recentVaultStore.available?"Stores vault paths outside encryption; never passwords. Disable to clear.":"Recent-vault history is unavailable. No new paths will be remembered; an older history file could not be read, cleared or updated.");
+        if(recentStorageHint) recentStorageHint->setText(recentVaultStore.available?(qEnvironmentVariableIsSet("PGPCRYPT_SANDBOX")?"Recent paths are temporary in the sandbox and disappear when PGPCrypt exits. Older history from previous versions may still exist on the host.":"Stores vault paths outside encryption; never passwords. Disable to clear."):"Recent-vault history is unavailable. No new paths will be remembered; an older history file could not be read, cleared or updated.");
     }
 
     void setRememberVaults(bool enabled) {
@@ -638,7 +653,7 @@ private:
         if(!enabled) recentVaultStore.paths.clear();
         if(enabled && unlocked && RecentVaultStore::validPath(activeVaultPath)) {recentVaultStore.paths.removeAll(activeVaultPath); recentVaultStore.paths.prepend(activeVaultPath);}
         const bool saved=recentVaultStore.save(); updateRecentVaultUi();
-        statusBar()->showMessage(saved?(enabled?"Recent vaults will be remembered on this device.":"Recent vault paths cleared; remembering is disabled."):"Could not save the recent-vault setting or clear stored paths. History is disabled for this session.");
+        statusBar()->showMessage(saved?(enabled?"Recent vaults will be remembered in this session.":"Recent vault paths cleared; remembering is disabled."):"Could not save the recent-vault setting or clear stored paths. History is disabled for this session.");
     }
 
     void openRecentVault(QListWidgetItem* item) {
@@ -652,6 +667,14 @@ private:
         if(value.startsWith("~/")) return QDir::cleanPath(QDir::home().filePath(value.mid(2)));
         if(QDir::isRelativePath(value)) return QDir::cleanPath(QDir::home().absoluteFilePath(value));
         return QDir::cleanPath(value);
+    }
+
+    static bool ephemeralLocation(const QString& filename) {
+        if(!qEnvironmentVariableIsSet("PGPCRYPT_SANDBOX")) return false;
+        QFileInfo info(filename); while(!info.exists() && info.absoluteFilePath()!="/") info.setFile(info.absolutePath());
+        const auto resolved=info.canonicalFilePath();
+        for(const auto& candidate:QStringList{QDir::cleanPath(filename),resolved}) for(const auto& root:QStringList{"/tmp",QDir::home().filePath(".config"),QDir::home().filePath(".local"),QDir::home().filePath(".cache")}) if(candidate==root || candidate.startsWith(root+"/")) return true;
+        return false;
     }
 
     void clearVaultCredentials() {
@@ -740,6 +763,7 @@ private:
         connect(browse,&QPushButton::clicked,&dialog,[&] { const auto value=chooseVaultPath(true,QDir::homePath(),format->currentData().toString()); if(!value.isEmpty()) filename->setText(value); });
         connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept); connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject); update();
         if(dialog.exec()!=QDialog::Accepted) { pass->clear(); confirm->clear(); return; }
+        if(ephemeralLocation(absoluteVaultPath(filename->text()))) {fail("Choose a persistent folder outside sandbox state and /tmp for the converted vault."); return;}
         QJsonObject fields{{"path",absoluteVaultPath(filename->text())},{"password",pass->text()},{"format",format->currentData().toString()}};
         pass->clear(); confirm->clear();
         request("convert_copy",fields,[this](bool ok,const QJsonObject&) { if(ok) statusBar()->showMessage("Converted copy saved. Original vault stays open and unchanged."); });
@@ -750,7 +774,7 @@ private:
         auto* layout = new QVBoxLayout(sessionPage);
         auto* heading = new QHBoxLayout;
         auto* title = new QLabel("PGPCrypt"); title->setStyleSheet("font-size: 24px; font-weight: 600;");
-        heading->addWidget(title); heading->addStretch();
+        heading->addWidget(title); sessionStats=new QLabel; sessionStats->setTextFormat(Qt::PlainText); heading->addWidget(sessionStats); heading->addStretch();
         auto* lock = new QPushButton("Lock vault  Ctrl+L"); heading->addWidget(lock);
         connect(lock,&QPushButton::clicked,this,[this] { endSession(true); });
         layout->addLayout(heading);
@@ -758,7 +782,7 @@ private:
         auto* navigation=new QWidget; auto* navLayout=new QVBoxLayout(navigation); navLayout->setContentsMargins(0,0,8,0); navLayout->setSpacing(10);
         navigation->setMinimumWidth(140); navigation->setMaximumWidth(170);
         auto* buttonGroup=new QButtonGroup(this); buttonGroup->setExclusive(true);
-        for(const auto& name:QStringList{"Keys","Notepad","Identities","Vault settings"}) {
+        for(const auto& name:QStringList{"Keys","Notepad","Identities","Saved notes","Vault settings"}) {
             auto* button=new QPushButton(name); button->setCheckable(true); button->setMinimumHeight(70); button->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Expanding);
             button->setStyleSheet("QPushButton { font-size: 15px; font-weight: 600; border-radius: 7px; padding: 12px; } QPushButton:checked { background: palette(highlight); color: palette(highlighted-text); }");
             buttonGroup->addButton(button,navigationButtons.size()); navigationButtons.append(button); navLayout->addWidget(button,1);
@@ -768,15 +792,16 @@ private:
         profileTabs=new QTabBar; profileTabs->setExpanding(false); profileTabs->setUsesScrollButtons(true); profileTabs->setDrawBase(true); profileTabs->addTab("All"); profileTabs->setTabData(0,QString()); profileTabs->addTab("+");
         contentLayout->addWidget(profileTabs);
         tabs = new QTabWidget; tabs->tabBar()->hide();
-        buildKeys(); buildText(); buildIdentities(); buildSettingsPage();
+        buildKeys(); buildText(); buildIdentities(); buildSavedNotes(); buildSettingsPage();
         contentLayout->addWidget(tabs,1); body->addWidget(content,1);
         connect(buttonGroup,&QButtonGroup::idClicked,tabs,&QTabWidget::setCurrentIndex);
         connect(tabs,&QTabWidget::currentChanged,this,[this](int index) {
             if(index>=0 && index<navigationButtons.size()) navigationButtons[index]->setChecked(true);
-            profileTabs->setVisible(index<2);
+            profileTabs->setVisible(index<2 || index==3);
             if(index==1) {configureNotepad(); showNotepad(); updateSelection(); QTimer::singleShot(0,this,[this] {if(unlocked && !pending && tabs->currentIndex()==1) refreshDocuments();});}
             if(index==2) populateProfileManager();
-            if(index==3) QTimer::singleShot(0,this,[this] {if(unlocked && !pending && tabs->currentIndex()==3) refreshProtectionStatus();});
+            if(index==3) QTimer::singleShot(0,this,[this] {if(unlocked && !pending && tabs->currentIndex()==3) refreshDocuments();});
+            if(index==4) QTimer::singleShot(0,this,[this] {if(unlocked && !pending && tabs->currentIndex()==4) refreshProtectionStatus();});
         });
         connect(profileTabs,&QTabBar::currentChanged,this,[this](int index) {
             if(index<0) return;
@@ -795,16 +820,15 @@ private:
     }
 
     void buildSettingsPage() {
-        auto* page=new QWidget; auto* layout=new QVBoxLayout(page);
+        auto* page=new QWidget; auto* outer=new QVBoxLayout(page); auto* scroll=new QScrollArea; scroll->setWidgetResizable(true); auto* content=new QWidget; auto* layout=new QVBoxLayout(content); scroll->setWidget(content); outer->addWidget(scroll);
         auto* title=new QLabel("Vault settings"); title->setStyleSheet("font-size: 20px; font-weight: 600;"); layout->addWidget(title);
         readOnlySettingsNote=new QLabel; readOnlySettingsNote->setWordWrap(true); readOnlySettingsNote->hide(); layout->addWidget(readOnlySettingsNote);
         auto* hint=new QLabel("Themes, locking, clipboard expiry and Qubes requests are saved inside this vault."); hint->setWordWrap(true); layout->addWidget(hint);
-        rememberVaultsCheck=new QCheckBox("Remember recent vaults on this device"); layout->addWidget(rememberVaultsCheck);
+        rememberVaultsCheck=new QCheckBox(qEnvironmentVariableIsSet("PGPCRYPT_SANDBOX")?"Remember recent vaults during this launch":"Remember recent vaults on this device"); layout->addWidget(rememberVaultsCheck);
         recentStorageHint=new QLabel; recentStorageHint->setWordWrap(true); layout->addWidget(recentStorageHint);
         connect(rememberVaultsCheck,&QCheckBox::toggled,this,[this](bool enabled) {setRememberVaults(enabled);}); updateRecentVaultUi();
-        auto* prefs=new QPushButton("Appearance and security preferences…"); prefs->setMinimumHeight(44); layout->addWidget(prefs); connect(prefs,&QPushButton::clicked,this,[this] {settingsDialog();});
-        auto* convert=new QPushButton("Save converted vault copy…"); convert->setMinimumHeight(44); layout->addWidget(convert); connect(convert,&QPushButton::clicked,this,[this] {convertVault();});
-        vaultMutationControls.append(prefs); vaultMutationControls.append(convert);
+        auto* panel=buildPreferencesPanel(); layout->addWidget(panel); vaultMutationControls.append(panel);
+        auto* convert=new QPushButton("Save converted vault copy…"); convert->setMinimumHeight(40); layout->addWidget(convert); connect(convert,&QPushButton::clicked,this,[this] {convertVault();}); vaultMutationControls.append(convert);
         auto* protection=new QGroupBox("Password and vault protection"); auto* protectionLayout=new QVBoxLayout(protection);
         protectionMasterCheck=new QCheckBox("Enable advanced vault protection"); protectionMasterCheck->setEnabled(false); protectionLayout->addWidget(protectionMasterCheck);
         auto* warning=new QLabel("Off by default. Enable this section before configuring alternative passwords or inactivity destruction. Disabling it erases all option settings. Enable each option, then set its password or period to activate it."); warning->setWordWrap(true); protectionLayout->addWidget(warning);
@@ -944,7 +968,7 @@ private:
         preferences=value;
         autoLock=value.value("auto_lock").toBool(); focusLock=value.value("lock_on_focus_loss").toBool(); sessionLock=value.value("lock_on_session_events").toBool();
         clipboardSeconds=value.value("clipboard_clear_seconds").toInt(); qubesEnabled=!sessionReadOnly && value.value("qubes_rpc").toBool();
-        notepadPopout=value.value("notepad_popout").toBool(true);
+        notepadPopout=value.value("notepad_popout").toBool(false);
         activityClock.restart(); lastTick=QDateTime::currentMSecsSinceEpoch();
         const auto theme=value.value("theme").toString("light");
         qApp->setStyle(QStyleFactory::create("Fusion"));
@@ -956,6 +980,10 @@ private:
         else if(theme=="warm-light") {background="#f3eee5"; base="#fffaf1"; text="#342e27"; accent="#99632f"; muted="#756b5b";}
         else if(theme=="solarized-light") {background="#eee8d5"; base="#fdf6e3"; text="#586e75"; accent="#006b98"; muted="#657b83";}
         else if(theme=="solarized" || theme=="solarized-dark") {background="#002b36"; base="#073642"; text="#93a1a1"; accent="#268bd2"; muted="#839496";}
+        else if(theme=="ruby-dark") {background="#29151f"; base="#190e15"; text="#ffe8ee"; accent="#aa3159"; muted="#cca2b2";}
+        else if(theme=="ruby-light") {background="#f7e8ed"; base="#fff8fa"; text="#451629"; accent="#a22750"; muted="#885a6a";}
+        else if(theme=="terminal-green") {background="#09120c"; base="#030805"; text="#7cf79b"; accent="#167a3a"; muted="#65a879";}
+        else if(theme=="cyberpunk") {background="#20152f"; base="#100d1d"; text="#f5e9ff"; accent="#ab227c"; muted="#b79cca";}
         else custom=false;
         if(custom) {
             palette.setColor(QPalette::Window,background); palette.setColor(QPalette::WindowText,text); palette.setColor(QPalette::Base,base); palette.setColor(QPalette::AlternateBase,background);
@@ -973,52 +1001,78 @@ private:
             const auto sheet=widget->styleSheet(); widget->setPalette(palette); widget->setStyleSheet({}); widget->setStyleSheet(sheet);
         }
         clipboardTimer.stop(); selectionTimer.stop();
-        if(clipboardSeconds>0) { if(qApp->clipboard()->ownsClipboard()) clipboardTimer.start(clipboardSeconds*1000); if(qApp->clipboard()->ownsSelection()) selectionTimer.start(clipboardSeconds*1000); }
+        if(clipboardSeconds>0) { if(sessionClipboard()) clipboardTimer.start(clipboardSeconds*1000); if(sessionClipboard(QClipboard::Selection)) selectionTimer.start(clipboardSeconds*1000); }
         if(sessionWarning) sessionWarning->setText("Vault unlocked. Press Ctrl+L to lock.");
+        activityClearTimer.stop(); const auto clearSeconds=value.value("activity_clear_seconds").toInt(); if(unlocked && clearSeconds>0) activityClearTimer.start(clearSeconds*1000);
+        if(syncSettingsControls) syncSettingsControls();
+        updateSessionStats();
         configureNotepad(); configureQubes();
     }
 
     void wireClipboard() {
         clipboardTimer.setSingleShot(true); selectionTimer.setSingleShot(true);
-        connect(qApp->clipboard(),&QClipboard::dataChanged,this,[this] { clipboardTimer.stop(); if(clipboardSeconds>0 && qApp->clipboard()->ownsClipboard()) clipboardTimer.start(clipboardSeconds*1000); });
-        connect(qApp->clipboard(),&QClipboard::selectionChanged,this,[this] { selectionTimer.stop(); if(clipboardSeconds>0 && qApp->clipboard()->ownsSelection()) selectionTimer.start(clipboardSeconds*1000); });
-        connect(&clipboardTimer,&QTimer::timeout,this,[] { if(qApp->clipboard()->ownsClipboard()) qApp->clipboard()->clear(); });
-        connect(&selectionTimer,&QTimer::timeout,this,[] { if(qApp->clipboard()->ownsSelection()) qApp->clipboard()->clear(QClipboard::Selection); });
+        const auto changed=[this](QClipboard::Mode mode,QTimer& timer) {
+            timer.stop();
+            if(!sessionClipboard(mode)) qApp->setProperty(clipboardDigestProperty(mode),QVariant());
+            else if(clipboardSeconds>0) timer.start(clipboardSeconds*1000);
+        };
+        connect(qApp->clipboard(),&QClipboard::dataChanged,this,[this,changed] {changed(QClipboard::Clipboard,clipboardTimer);});
+        connect(qApp->clipboard(),&QClipboard::selectionChanged,this,[this,changed] {changed(QClipboard::Selection,selectionTimer);});
+        connect(&clipboardTimer,&QTimer::timeout,this,[] {clearSessionClipboard();});
+        connect(&selectionTimer,&QTimer::timeout,this,[] {clearSessionClipboard(QClipboard::Selection);});
     }
 
-    void settingsDialog() {
-        if(!unlocked || pending) return;
-        QDialog dialog(this); dialog.setWindowTitle("Vault settings"); dialog.setMinimumWidth(540);
-        auto* layout=new QVBoxLayout(&dialog); auto* form=new QFormLayout;
-        auto* enable=new QCheckBox("Lock after inactivity"); enable->setChecked(autoLock); form->addRow(enable);
-        auto* minutes=new QSlider(Qt::Horizontal); minutes->setRange(1,60); minutes->setValue(idleTimeoutSeconds/60); minutes->setEnabled(autoLock);
-        auto* minuteLabel=new QLabel; auto updateMinutes=[=] {minuteLabel->setText(QString::number(minutes->value())+" minutes");}; updateMinutes();
-        auto* row=new QHBoxLayout; row->addWidget(minutes); row->addWidget(minuteLabel); form->addRow("Inactivity timeout",row);
-        connect(enable,&QCheckBox::toggled,minutes,&QWidget::setEnabled); connect(minutes,&QSlider::valueChanged,&dialog,updateMinutes);
-        auto* focus=new QCheckBox("Lock when switching away from PGPCrypt"); focus->setChecked(focusLock); form->addRow(focus);
-        auto* events=new QCheckBox("Lock on desktop lock, suspend or Qubes lock request"); events->setChecked(sessionLock); form->addRow(events);
-        auto* clip=new QCheckBox("Clear text copied from PGPCrypt"); clip->setChecked(clipboardSeconds>0); form->addRow(clip);
-        auto* seconds=new QSlider(Qt::Horizontal); seconds->setRange(5,1800); seconds->setValue(clipboardSeconds>0?clipboardSeconds:30); seconds->setEnabled(clipboardSeconds>0);
-        auto* secondLabel=new QLabel; auto updateSeconds=[=] {secondLabel->setText(QString::number(seconds->value()/60)+"m "+QString::number(seconds->value()%60)+"s");}; updateSeconds();
-        auto* clipRow=new QHBoxLayout; clipRow->addWidget(seconds); clipRow->addWidget(secondLabel); form->addRow("Clipboard delay",clipRow);
-        connect(clip,&QCheckBox::toggled,seconds,&QWidget::setEnabled); connect(seconds,&QSlider::valueChanged,&dialog,updateSeconds);
+    void resetActivity() {if(activityLog) {activityLog->clear(); activityLog->record(ActivityEvent::SessionReady);}}
+    void updateSessionStats() {
+        if(!sessionStats) return;
+        sessionStats->setVisible(unlocked && preferences.value("show_session_stats").toBool());
+        const auto seconds=sessionClock.isValid()?sessionClock.elapsed()/1000:0;
+        sessionStats->setText(QString("Session %1m %2s · Completed actions %3 · Failed opens %4").arg(seconds/60).arg(seconds%60).arg(sessionOperations).arg(failedOpens));
+        sessionStats->setToolTip("Memory-only counters for this application launch. Failed opens include file and password errors; attempts in other processes are not counted.");
+    }
+
+    QWidget* buildPreferencesPanel() {
+        auto* panel=new QGroupBox("Appearance and session security"); auto* form=new QFormLayout(panel);
         auto* theme=new QComboBox;
-        theme->addItem("Light","light"); theme->addItem("Warm light","warm-light"); theme->addItem("Dark","dark"); theme->addItem("Nord","nord"); theme->addItem("Solarized light","solarized-light"); theme->addItem("Solarized dark","solarized-dark");
-        auto savedTheme=preferences.value("theme").toString("light"); if(savedTheme=="solarized") savedTheme="solarized-dark";
-        theme->setCurrentIndex(qMax(0,theme->findData(savedTheme))); form->addRow("Theme",theme);
-        auto* popout=new QCheckBox("Open Notepad in its own window"); popout->setChecked(notepadPopout); form->addRow(popout);
-        auto* popoutHint=new QLabel("One shared Notepad stays in this session. Key, profile and document changes update both windows immediately; no separate copy is saved."); popoutHint->setWordWrap(true); form->addRow(popoutHint);
-        auto* qubes=new QCheckBox("Allow requests from other Qubes while unlocked"); qubes->setChecked(qubesEnabled); form->addRow(qubes);
-        auto* qubesHint=new QLabel("Other Qubes can ask this vault to sign or decrypt. You approve each request here; private keys stay in this Qube. A dom0 policy must allow the client first."); qubesHint->setWordWrap(true); form->addRow(qubesHint);
-        auto* qubesHelp=new QPushButton("Qubes setup details…"); form->addRow(qubesHelp);
-        connect(qubesHelp,&QPushButton::clicked,&dialog,[&] {QMessageBox::information(&dialog,"Qubes requests","This enables the local PGPCrypt service only while the vault is open.\n\nInstall a named-client qrexec policy in dom0 separately. The setup guide is /usr/share/doc/pgpcrypt/design/QUBES.md; policy examples are in /usr/share/doc/pgpcrypt/source.tar.gz. Each request shows its source Qube and content for your approval.\n\nAutomatic host locking also needs the separate dom0 lock hook and the lock-events setting above. Do not enable requests from untrusted clients.");});
-        layout->addLayout(form);
-        auto* hint=new QLabel("Settings are encrypted in this vault. Clipboard expiry cannot erase copies kept by other apps or Qubes."); hint->setWordWrap(true); layout->addWidget(hint);
-        auto* convert=new QPushButton("Save converted vault copy…"); layout->addWidget(convert); connect(convert,&QPushButton::clicked,&dialog,[&] {dialog.reject(); convertVault();});
-        auto* buttons=new QDialogButtonBox(QDialogButtonBox::Save|QDialogButtonBox::Cancel); layout->addWidget(buttons); connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject); connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept);
-        if(dialog.exec()!=QDialog::Accepted) return;
-        QJsonObject value{{"auto_lock",enable->isChecked()},{"lock_on_focus_loss",focus->isChecked()},{"lock_on_session_events",events->isChecked()},{"clipboard_clear_seconds",clip->isChecked()?seconds->value():0},{"theme",theme->currentData().toString()},{"qubes_rpc",qubes->isChecked()},{"notepad_popout",popout->isChecked()}};
-        request("settings_set",{{"idle_timeout_seconds",minutes->value()*60},{"preferences",value}},[this](bool ok,const QJsonObject& data) {if(ok) {idleTimeoutSeconds=data.value("idle_timeout_seconds").toInt(300); applyPreferences(data.value("preferences").toObject());}});
+        const QList<QPair<QString,QString>> themes{{"Light","light"},{"Warm light","warm-light"},{"Dark","dark"},{"Nord","nord"},{"Solarized light","solarized-light"},{"Solarized dark","solarized-dark"},{"Ruby dark","ruby-dark"},{"Ruby light","ruby-light"},{"Hacker green","terminal-green"},{"Cyberpunk","cyberpunk"}};
+        for(const auto& entry:themes) theme->addItem(entry.first,entry.second);
+        form->addRow("Theme",theme);
+        auto* popout=new QCheckBox("Open Notepad in its own window"); form->addRow(popout);
+        auto* enable=new QCheckBox("Lock after inactivity"); form->addRow(enable);
+        auto* minutes=new QSlider(Qt::Horizontal); minutes->setRange(1,60); auto* minuteLabel=new QLabel;
+        auto* row=new QHBoxLayout; row->addWidget(minutes); row->addWidget(minuteLabel); form->addRow("Inactivity timeout",row);
+        connect(enable,&QCheckBox::toggled,minutes,&QWidget::setEnabled); connect(minutes,&QSlider::valueChanged,panel,[=](int value) {minuteLabel->setText(QString::number(value)+" minutes");});
+        auto* focus=new QCheckBox("Lock when switching away from PGPCrypt"); form->addRow(focus);
+        auto* events=new QCheckBox("Lock on desktop events or an allowed Qubes lock request"); form->addRow(events);
+        auto* eventHint=new QLabel("The packaged sandbox blocks desktop D-Bus: desktop lock/suspend signals are unavailable there. Qubes Lock requests require the documented dom0 hook. Use inactivity locking or Ctrl+L as well."); eventHint->setWordWrap(true); form->addRow(eventHint);
+        auto* clip=new QCheckBox("Clear copied text after a delay"); form->addRow(clip);
+        auto* seconds=new QSlider(Qt::Horizontal); seconds->setRange(5,1800); auto* secondLabel=new QLabel;
+        auto* clipRow=new QHBoxLayout; clipRow->addWidget(seconds); clipRow->addWidget(secondLabel); form->addRow("Clipboard delay",clipRow);
+        connect(clip,&QCheckBox::toggled,seconds,&QWidget::setEnabled); connect(seconds,&QSlider::valueChanged,panel,[=](int value) {secondLabel->setText(QString("%1m %2s").arg(value/60).arg(value%60));});
+        auto* clipHint=new QLabel("Lock always clears text still owned by PGPCrypt, even with this timer off. External clipboard history cannot be erased."); clipHint->setWordWrap(true); form->addRow(clipHint);
+        auto* clearActivity=new QCheckBox("Periodically clear session activity"); form->addRow(clearActivity);
+        auto* activitySeconds=new QSpinBox; activitySeconds->setRange(5,3600); activitySeconds->setSuffix(" seconds"); form->addRow("Activity clear interval",activitySeconds); connect(clearActivity,&QCheckBox::toggled,activitySeconds,&QWidget::setEnabled);
+        auto* stats=new QCheckBox("Show memory-only session counters"); form->addRow(stats);
+        auto* statsHint=new QLabel("Counts completed actions and failed opens in this launch only. No login history is stored. Turn off for a quieter workspace."); statsHint->setWordWrap(true); form->addRow(statsHint);
+        auto* usb=new QCheckBox("Allow removable media for message import and export"); form->addRow(usb);
+        auto* usbHint=new QLabel("Off hides USB/removable mounts in the message picker and blocks message reads/writes there. It does not disable OS automounting, other applications, or opening a vault stored on a USB device."); usbHint->setWordWrap(true); form->addRow(usbHint);
+        memoryStatus=new QLabel; memoryStatus->setTextFormat(Qt::PlainText); memoryStatus->setWordWrap(true); form->addRow("Worker memory",memoryStatus);
+        auto* qubes=new QCheckBox("Allow requests from other Qubes while unlocked"); form->addRow(qubes);
+        auto* qubesHint=new QLabel("A named-client dom0 policy is required. You approve each signing/decryption request here; private keys stay in this Qube. Setup: /usr/share/doc/pgpcrypt/design/QUBES.md"); qubesHint->setWordWrap(true); form->addRow(qubesHint);
+        auto* save=new QPushButton("Save preferences"); form->addRow(save);
+        connect(save,&QPushButton::clicked,this,[=,this] {
+            QJsonObject value{{"auto_lock",enable->isChecked()},{"lock_on_focus_loss",focus->isChecked()},{"lock_on_session_events",events->isChecked()},{"clipboard_clear_seconds",clip->isChecked()?seconds->value():0},{"theme",theme->currentData().toString()},{"qubes_rpc",qubes->isChecked()},{"notepad_popout",popout->isChecked()},{"activity_clear_seconds",clearActivity->isChecked()?activitySeconds->value():0},{"show_session_stats",stats->isChecked()},{"allow_removable_media",usb->isChecked()}};
+            request("settings_set",{{"idle_timeout_seconds",minutes->value()*60},{"preferences",value}},[this](bool ok,const QJsonObject& data) {if(ok) {idleTimeoutSeconds=data.value("idle_timeout_seconds").toInt(300); applyPreferences(data.value("preferences").toObject()); statusBar()->showMessage("Preferences saved in this vault.");}});
+        });
+        syncSettingsControls=[=,this] {
+            auto savedTheme=preferences.value("theme").toString("light"); if(savedTheme=="solarized") savedTheme="solarized-dark"; theme->setCurrentIndex(qMax(0,theme->findData(savedTheme)));
+            popout->setChecked(notepadPopout); enable->setChecked(autoLock); minutes->setValue(idleTimeoutSeconds/60); minutes->setEnabled(autoLock); minuteLabel->setText(QString::number(minutes->value())+" minutes");
+            focus->setChecked(focusLock); events->setChecked(sessionLock); clip->setChecked(clipboardSeconds>0); seconds->setValue(clipboardSeconds>0?clipboardSeconds:30); seconds->setEnabled(clipboardSeconds>0); secondLabel->setText(QString("%1m %2s").arg(seconds->value()/60).arg(seconds->value()%60));
+            const auto interval=preferences.value("activity_clear_seconds").toInt(); clearActivity->setChecked(interval>0); activitySeconds->setValue(interval>0?interval:300); activitySeconds->setEnabled(interval>0); stats->setChecked(preferences.value("show_session_stats").toBool()); usb->setChecked(preferences.value("allow_removable_media").toBool()); qubes->setChecked(qubesEnabled);
+            const auto swap=workerSecurity.value("swap").toString("unknown");
+            memoryStatus->setText((workerSecurity.value("selected_buffers_locked").toBool()?QString("Retained worker password pages locked. "):QString("Memory locking unavailable or limited. "))+(swap=="active"?QString("Swap is active; encryption is unknown. "):swap=="none"?QString("No active swap at worker startup. "):QString("Swap status unavailable. "))+"GUI and library copies are not all locked.");
+        };
+        return panel;
     }
 
     void buildKeys() {
@@ -1103,7 +1157,7 @@ private:
         auto* purpose=new QComboBox; purpose->addItem("Encryption (transport and storage)","encrypt"); purpose->addItem("Signing","sign"); purpose->addItem("Authentication","authenticate"); form->addRow("Purpose",purpose);
         auto* algorithm=new QComboBox; algorithm->addItem("Ed25519 / Cv25519","cv25519"); for(int bits:{2048,4096}) algorithm->addItem("RSA "+QString::number(bits),"rsa"+QString::number(bits));
         algorithm->addItem("NIST P-256","p256"); algorithm->addItem("NIST P-384","p384"); algorithm->addItem("NIST P-521","p521"); form->addRow("Algorithm",algorithm);
-        auto* expiry=new QCheckBox("Set expiry"); expiry->setChecked(true); auto* date=new QDateTimeEdit(QDateTime::currentDateTimeUtc().addYears(1)); date->setCalendarPopup(true); date->setDisplayFormat("yyyy-MM-dd HH:mm 'UTC'");
+        auto* expiry=new QCheckBox("Set expiry"); expiry->setChecked(false); auto* date=new QDateTimeEdit(QDateTime::currentDateTimeUtc().addYears(1)); date->setCalendarPopup(true); date->setDisplayFormat("yyyy-MM-dd HH:mm 'UTC'"); date->setEnabled(false);
         form->addRow(expiry); form->addRow("Expires",date); connect(expiry,&QCheckBox::toggled,date,&QWidget::setEnabled);
         auto* pass=new QLineEdit; auto* confirm=new QLineEdit; for(auto* field:{pass,confirm}) {field->setEchoMode(QLineEdit::Password); field->setInputMethodHints(Qt::ImhSensitiveData|Qt::ImhNoPredictiveText);}
         limitNewPassword(pass); limitNewPassword(confirm);
@@ -1133,9 +1187,9 @@ private:
         auto* certify=new QCheckBox("Certification (primary key)"); certify->setChecked(true); certify->setEnabled(false);
         auto* signing=new QCheckBox("Sign"); signing->setChecked(true);
         auto* transport=new QCheckBox("Encrypt messages and files"); transport->setChecked(true);
-        auto* authentication=new QCheckBox("Authentication subkey (advanced, optional)");
+        auto* authentication=new QCheckBox("Authentication"); authentication->setChecked(true);
         authentication->setToolTip("For systems explicitly supporting OpenPGP authentication. It is not required for signing or encryption.");
-        form->addRow("Capabilities",certify); form->addRow(signing); form->addRow(transport); form->addRow(authentication);
+        auto* capabilities=new QWidget; auto* capabilityLayout=new QVBoxLayout(capabilities); capabilityLayout->setContentsMargins(0,0,0,0); for(auto* check:{certify,signing,transport,authentication}) capabilityLayout->addWidget(check); form->addRow("Capabilities",capabilities);
         auto* capabilityHint=new QLabel("Encryption sets both OpenPGP transport and storage flags. Certification binds the identity and subkeys."); capabilityHint->setWordWrap(true); form->addRow(capabilityHint);
         auto updateLayout=[=] {
             const bool rsa=algorithm->currentData().toString().startsWith("rsa");
@@ -1144,8 +1198,8 @@ private:
             certify->setEnabled(!subkeys); if(subkeys) certify->setChecked(true);
         };
         connect(algorithm,&QComboBox::currentIndexChanged,&dialog,updateLayout); connect(keyLayout,&QComboBox::currentIndexChanged,&dialog,updateLayout);
-        auto* expire=new QCheckBox("Expire on"); expire->setChecked(true);
-        auto* date=new QDateTimeEdit(QDateTime::currentDateTimeUtc().addYears(2)); date->setCalendarPopup(true); date->setDisplayFormat("yyyy-MM-dd HH:mm 'UTC'");
+        auto* expire=new QCheckBox("Expire on"); expire->setChecked(false);
+        auto* date=new QDateTimeEdit(QDateTime::currentDateTimeUtc().addYears(2)); date->setCalendarPopup(true); date->setDisplayFormat("yyyy-MM-dd HH:mm 'UTC'"); date->setEnabled(false);
         connect(expire,&QCheckBox::toggled,date,&QWidget::setEnabled); form->addRow(expire,date);
         auto* pass=new QLineEdit; auto* confirm=new QLineEdit;
         for(auto* field : {pass,confirm}) { field->setEchoMode(QLineEdit::Password); field->setInputMethodHints(Qt::ImhSensitiveData | Qt::ImhNoPredictiveText | Qt::ImhNoAutoUppercase); }
@@ -1206,13 +1260,13 @@ private:
 
     void installCopyMenu(QTableWidget* table) {
         table->setContextMenuPolicy(Qt::CustomContextMenu); connect(table,&QWidget::customContextMenuRequested,this,[this,table](const QPoint& point) {
-            const auto index=table->indexAt(point); if(!index.isValid()) return; table->selectRow(index.row()); const auto copiedValue=table->item(index.row(),index.column())->text(); const auto copiedRow=tableRowText(table,index.row()); QMenu menu; auto* value=menu.addAction("Copy value"); auto* row=menu.addAction("Copy row"); const auto selected=menu.exec(table->viewport()->mapToGlobal(point)); if(ending || !unlocked) return; if(selected==value) qApp->clipboard()->setText(copiedValue); else if(selected==row) qApp->clipboard()->setText(copiedRow);
+            const auto index=table->indexAt(point); if(!index.isValid()) return; table->selectRow(index.row()); const auto copiedValue=table->item(index.row(),index.column())->text(); const auto copiedRow=tableRowText(table,index.row()); QMenu menu; auto* value=menu.addAction("Copy value"); auto* row=menu.addAction("Copy row"); const auto selected=menu.exec(table->viewport()->mapToGlobal(point)); if(ending || !unlocked) return; if(selected==value) copySessionText(copiedValue); else if(selected==row) copySessionText(copiedRow);
         });
     }
 
     void copyPublicKey(const QString& fingerprint,std::function<void()> after = {}) {
         if(pending || !unlocked) return;
-        request("public_export",{{"fingerprint",fingerprint}},[this,after](bool ok,const QJsonObject& data) {if(ok) {qApp->clipboard()->setText(data.value("text").toString()); statusBar()->showMessage("Public key copied. Public exports reveal its identities."); if(after) after();}});
+        request("public_export",{{"fingerprint",fingerprint}},[this,after](bool ok,const QJsonObject& data) {if(ok) {copySessionText(data.value("text").toString()); statusBar()->showMessage("Public key copied. Public exports reveal its identities."); if(after) after();}});
     }
 
     void exportKey(const QString& operation,const QString& fingerprint) {
@@ -1240,7 +1294,7 @@ private:
                 revocation=menu.addAction("Show revocation certificate…"); revocation->setEnabled(!pending && key.value("has_secret").toBool());
             }
             const auto selected=menu.exec(table->viewport()->mapToGlobal(point)); if(!selected || ending || !unlocked) return;
-            if(selected==value) qApp->clipboard()->setText(copiedValue); else if(selected==fingerprint) qApp->clipboard()->setText(fp); else if(selected==row) qApp->clipboard()->setText(copiedRow);
+            if(selected==value) copySessionText(copiedValue); else if(selected==fingerprint) copySessionText(fp); else if(selected==row) copySessionText(copiedRow);
             else if(!pending && selected==publicKey) copyPublicKey(fp); else if(!pending && selected==makeDefault) saveDefaultKey(fp); else if(!pending && selected==clearDefault) saveDefaultKey({}); else if(!pending && selected==subkeys) subkeysDialog(fp); else if(!pending && selected==password) protectKeyDialog(fp); else if(!pending && selected==privateKey) confirmPrivateExport(fp);
             else if(!pending && selected==revocation && QMessageBox::question(this,"Revocation certificate","Anyone with this certificate can revoke your key. Keep it private until revoking.",QMessageBox::Yes|QMessageBox::Cancel,QMessageBox::Cancel)==QMessageBox::Yes) exportKey("revocation_export",fp);
         });
@@ -1300,7 +1354,7 @@ private:
         if(id!=activeProfile) {activeProfile=id; currentDocumentId.clear(); currentDocumentTitle.clear(); updateDocumentContext(); if(documents) documents->setRowCount(0);}
         {QSignalBlocker block(profileTabs); profileTabs->setCurrentIndex(profileTabIndex(activeProfile));}
         syncNotepadProfiles(); renderKeys();
-        if(unlocked && !pending && (tabs->currentIndex()==1 || (notepadWindow && notepadWindow->isVisible()))) refreshDocuments();
+        if(unlocked && !pending && (tabs->currentIndex()==1 || tabs->currentIndex()==3 || (notepadWindow && notepadWindow->isVisible()))) refreshDocuments();
         statusBar()->showMessage("Profile: "+profileTitle(activeProfile)+". Profiles organize this vault; they do not add separate encryption.");
     }
 
@@ -1406,7 +1460,7 @@ private:
             if(QMessageBox::question(this,"Delete identity","Delete this identity? Its keys and documents are kept; documents become unassigned.",QMessageBox::Yes|QMessageBox::Cancel,QMessageBox::Cancel)!=QMessageBox::Yes) return;
             request("profile_delete",{{"profile_id",id}},[this](bool ok,const QJsonObject&) {if(ok) {identityDirty=false; refreshKeys();}});
         });
-        identityOverview->setContextMenuPolicy(Qt::CustomContextMenu); connect(identityOverview,&QWidget::customContextMenuRequested,this,[this](const QPoint& point) {const auto index=identityOverview->indexAt(point); if(!index.isValid()) return; identityOverview->selectRow(index.row()); const auto value=identityOverview->item(index.row(),index.column())->text(); const auto id=identityOverview->item(index.row(),0)->data(Qt::UserRole).toString(); QMenu menu; auto* copy=menu.addAction("Copy value"); auto* edit=menu.addAction("Edit identity"); const auto selected=menu.exec(identityOverview->viewport()->mapToGlobal(point)); if(ending || !unlocked) return; if(selected==copy) qApp->clipboard()->setText(value); else if(selected==edit) {profileSelector->setCurrentIndex(qMax(0,profileSelector->findData(id))); if(editedIdentityId==id) profileName->setFocus();}});
+        identityOverview->setContextMenuPolicy(Qt::CustomContextMenu); connect(identityOverview,&QWidget::customContextMenuRequested,this,[this](const QPoint& point) {const auto index=identityOverview->indexAt(point); if(!index.isValid()) return; identityOverview->selectRow(index.row()); const auto value=identityOverview->item(index.row(),index.column())->text(); const auto id=identityOverview->item(index.row(),0)->data(Qt::UserRole).toString(); QMenu menu; auto* copy=menu.addAction("Copy value"); auto* edit=menu.addAction("Edit identity"); const auto selected=menu.exec(identityOverview->viewport()->mapToGlobal(point)); if(ending || !unlocked) return; if(selected==copy) copySessionText(value); else if(selected==edit) {profileSelector->setCurrentIndex(qMax(0,profileSelector->findData(id))); if(editedIdentityId==id) profileName->setFocus();}});
         installKeyMenu(profileMembers); vaultMutationControls.append(page); tabs->addTab(page,"Identities");
     }
 
@@ -1520,30 +1574,12 @@ private:
         connect(signingChoice,&QComboBox::currentIndexChanged,this,[this] {updateSelection();}); connect(recipientChoices,&QTableWidget::itemChanged,this,[this] {updateSelection();});
         selectionSummary=new QLabel; selectionSummary->setTextFormat(Qt::PlainText); selectionSummary->setWordWrap(true); selectorLayout->addWidget(selectionSummary); sectionSplitter->addWidget(selectorPanel);
         auto* workspace=new QSplitter;
-        auto* browser=new QWidget; auto* browserLayout=new QVBoxLayout(browser); browserLayout->setContentsMargins(0,0,7,0); browser->setMinimumWidth(200);
-        auto* browserTitle=new QLabel("Saved in this vault"); browserTitle->setStyleSheet("font-weight: 600;"); browserLayout->addWidget(browserTitle);
-        documentSearch=new QLineEdit; documentSearch->setPlaceholderText("Find a vault document…"); browserLayout->addWidget(documentSearch);
-        documents=new QTableWidget(0,4); documents->setHorizontalHeaderLabels({"Document","Profile","Created","Updated"}); styleTable(documents); documents->setColumnWidth(0,165); documents->setColumnWidth(1,115); documents->setColumnWidth(2,98); documents->setColumnWidth(3,98); documents->setMinimumWidth(200); browserLayout->addWidget(documents,1);
-        connect(documentSearch,&QLineEdit::textChanged,this,[this] {filterDocuments();}); connect(documents->horizontalHeader(),&QHeaderView::sortIndicatorChanged,this,[this] {QTimer::singleShot(0,this,[this] {filterDocuments();});});
-        auto* documentActions=new QHBoxLayout; auto* openSaved=new QPushButton("Open"); auto* properties=new QPushButton("Properties…"); documentActions->addWidget(openSaved); documentActions->addWidget(properties); vaultMutationControls.append(properties); browserLayout->addLayout(documentActions);
-        auto* otherActions=new QHBoxLayout; auto* fresh=new QPushButton("New"); auto* removeSaved=new QPushButton("Delete…"); otherActions->addWidget(fresh); otherActions->addWidget(removeSaved); vaultMutationControls.append(removeSaved); browserLayout->addLayout(otherActions);
-        connect(fresh,&QPushButton::clicked,this,[this] {if((!input->toPlainText().isEmpty() || !output->toPlainText().isEmpty()) && QMessageBox::question(this,"New document","Discard unsaved Notepad text? Saved documents are unchanged.",QMessageBox::Discard|QMessageBox::Cancel,QMessageBox::Cancel)!=QMessageBox::Discard) return; input->clear(); output->clear(); currentDocumentId.clear(); currentDocumentTitle.clear(); currentDocumentProfile.clear(); outputIsEncrypted=false; clearVerificationIdentity(); updateDocumentContext(); input->setFocus();});
-        auto* refresh=new QPushButton("Refresh vault files"); browserLayout->addWidget(refresh); connect(refresh,&QPushButton::clicked,this,[this] {refreshDocuments();});
-        connect(openSaved,&QPushButton::clicked,this,[this] {openVaultDocument();}); connect(documents,&QTableWidget::cellDoubleClicked,this,[this](int,int) {openVaultDocument();});
-        connect(properties,&QPushButton::clicked,this,[this] {documentPropertiesDialog();}); connect(removeSaved,&QPushButton::clicked,this,[this] {deleteVaultDocument();});
-        connect(documents->horizontalHeader(),&QHeaderView::sortIndicatorChanged,this,[this] {QTimer::singleShot(0,this,[this] {filterDocuments();});});
-        documents->setContextMenuPolicy(Qt::CustomContextMenu); connect(documents,&QWidget::customContextMenuRequested,this,[this](const QPoint& point) {
-            const auto index=documents->indexAt(point); if(!index.isValid()) return; documents->selectRow(index.row());
-            const auto documentId=documents->item(index.row(),0)->data(Qt::UserRole).toString(); const auto profileId=activeProfile;
-            const auto copiedValue=documents->item(index.row(),index.column())->text(); const auto copiedRow=tableRowText(documents,index.row());
-            QMenu menu; auto* open=menu.addAction("Open"); auto* props=menu.addAction("Properties…"); props->setEnabled(!sessionReadOnly && !pending); auto* copy=menu.addAction("Copy value"); auto* row=menu.addAction("Copy row"); auto* text=menu.addAction("Copy document text"); text->setEnabled(!pending); menu.addSeparator(); auto* remove=menu.addAction("Delete…"); remove->setEnabled(!sessionReadOnly && !pending);
-            const auto selected=menu.exec(documents->viewport()->mapToGlobal(point)); if(!selected || ending || !unlocked) return;
-            if(selected==copy) {qApp->clipboard()->setText(copiedValue); return;} if(selected==row) {qApp->clipboard()->setText(copiedRow); return;} if(pending) return;
-            if(selected==text) {request("document_get",{{"document_id",documentId},{"profile_id",profileId}},[this](bool ok,const QJsonObject& data) {if(ok && unlocked && !ending) {qApp->clipboard()->setText(data.value("text").toString()); statusBar()->showMessage("Document text copied.");}}); return;}
-            int current=-1; for(int candidate=0;candidate<documents->rowCount();++candidate) if(documents->item(candidate,0)->data(Qt::UserRole).toString()==documentId) {current=candidate; break;}
-            if(current<0) {statusBar()->showMessage("Document no longer appears in this view."); return;} documents->selectRow(current);
-            if(selected==open) openVaultDocument(); else if(selected==props) documentPropertiesDialog(); else if(selected==remove) deleteVaultDocument();
-        }); workspace->addWidget(browser);
+        auto* browser=new QWidget; auto* browserLayout=new QVBoxLayout(browser); browserLayout->setContentsMargins(0,0,7,0); browser->setMinimumWidth(190); browser->setMaximumWidth(320);
+        auto* browserTitle=new QLabel("Recent saved notes"); browserTitle->setStyleSheet("font-weight: 600;"); browserLayout->addWidget(browserTitle);
+        recentDocuments=new QTableWidget(0,2); recentDocuments->setHorizontalHeaderLabels({"Document","Modified"}); styleTable(recentDocuments); recentDocuments->setColumnWidth(0,150); recentDocuments->setColumnWidth(1,130); recentDocuments->setSortingEnabled(false); recentDocuments->horizontalHeader()->setSectionsClickable(false); browserLayout->addWidget(recentDocuments,1);
+        auto loadRecent=[this] {const auto row=recentDocuments->currentRow(); if(row>=0) openVaultDocument(recentDocuments->item(row,0)->data(Qt::UserRole).toString());};
+        auto* load=new QPushButton("Load selected"); browserLayout->addWidget(load); connect(load,&QPushButton::clicked,this,loadRecent); connect(recentDocuments,&QTableWidget::cellDoubleClicked,this,[loadRecent](int,int) {loadRecent();});
+        auto* manage=new QPushButton("Manage saved notes…"); browserLayout->addWidget(manage); connect(manage,&QPushButton::clicked,this,[this] {tabs->setCurrentIndex(3); if(notepadWindow) notepadWindow->hide();}); workspace->addWidget(browser);
         auto* textWorkspace=new QWidget; auto* textLayout=new QVBoxLayout(textWorkspace); textLayout->setContentsMargins(0,0,0,0); textLayout->setSpacing(6);
         documentContext=new QLabel("Unsaved text — stored only when you choose Save in vault."); documentContext->setTextFormat(Qt::PlainText); documentContext->setWordWrap(true); textLayout->addWidget(documentContext);
         input=editor("Paste text or import a message. Nothing is saved automatically…"); output=editor("Result appears here after the operation succeeds…",true);
@@ -1553,7 +1589,7 @@ private:
         auto* outputPanel=new QWidget; auto* outputLayout=new QVBoxLayout(outputPanel); outputLayout->setContentsMargins(0,0,0,0); outputLayout->setSpacing(4);
         auto* outputHeading=new QHBoxLayout; auto* outputLabel=new QLabel("Output"); outputLabel->setStyleSheet("font-weight: 600;"); outputHeading->addWidget(outputLabel); outputHeading->addStretch(); copyOutput=new QPushButton("Copy all"); outputHeading->addWidget(copyOutput); outputLayout->addLayout(outputHeading);
         verificationIdentity=new QLabel; verificationIdentity->setTextFormat(Qt::PlainText); verificationIdentity->setWordWrap(true); verificationIdentity->setTextInteractionFlags(Qt::TextSelectableByMouse); verificationIdentity->hide(); outputLayout->addWidget(verificationIdentity); outputLayout->addWidget(output,1);
-        copyOutput->setEnabled(false); connect(output,&QPlainTextEdit::textChanged,copyOutput,[this] {copyOutput->setEnabled(!output->toPlainText().isEmpty());}); connect(copyOutput,&QPushButton::clicked,this,[this] {qApp->clipboard()->setText(output->toPlainText()); statusBar()->showMessage("Output copied. Clipboard managers may retain it.");});
+        copyOutput->setEnabled(false); connect(output,&QPlainTextEdit::textChanged,copyOutput,[this] {copyOutput->setEnabled(!output->toPlainText().isEmpty());}); connect(copyOutput,&QPushButton::clicked,this,[this] {copySessionText(output->toPlainText()); statusBar()->showMessage("Output copied. Clipboard managers may retain it.");});
         auto* panes=new QSplitter(Qt::Vertical); panes->addWidget(inputPanel); panes->addWidget(outputPanel); panes->setChildrenCollapsible(false); textLayout->addWidget(panes,1); workspace->addWidget(textWorkspace); workspace->setStretchFactor(1,1); workspace->setSizes({350,700}); sectionSplitter->addWidget(workspace); sectionSplitter->setStretchFactor(1,2); sectionSplitter->setSizes({230,400}); layout->addWidget(sectionSplitter,1);
         auto* actions=new QHBoxLayout; for(const auto& name:QStringList{"Encrypt","Decrypt","Sign","Verify"}) {auto* button=new QPushButton(name); actions->addWidget(button); connect(button,&QPushButton::clicked,this,[this,name] {textAction(name.toLower());});}
         auto* clear=new QPushButton("Clear"); actions->addWidget(clear); connect(clear,&QPushButton::clicked,this,[this] {input->clear(); output->clear(); outputIsEncrypted=false; clearVerificationIdentity(); currentDocumentId.clear(); currentDocumentTitle.clear(); updateDocumentContext();}); layout->addLayout(actions);
@@ -1570,6 +1606,36 @@ private:
         auto* openNotepad=new QPushButton("Show Notepad window"); openNotepad->setMinimumHeight(44); placeholderLayout->addWidget(openNotepad); connect(openNotepad,&QPushButton::clicked,this,[this] {showNotepad();}); auto* embedHint=new QLabel("To use one window, turn off “Open Notepad in its own window” in Vault settings."); embedHint->setWordWrap(true); placeholderLayout->addWidget(embedHint); placeholderLayout->addStretch(); notepadHostLayout->addWidget(notepadPlaceholder); notepadPlaceholder->hide();
         tabs->addTab(notepadHost,"Notepad");
     }
+
+    void buildSavedNotes() {
+        auto* page=new QWidget; auto* layout=new QVBoxLayout(page);
+        auto* browser=new QWidget; auto* browserLayout=new QVBoxLayout(browser); browserLayout->setContentsMargins(0,0,7,0); browser->setMinimumWidth(200);
+        auto* browserTitle=new QLabel("Saved in this vault"); browserTitle->setStyleSheet("font-weight: 600;"); browserLayout->addWidget(browserTitle);
+        documentSearch=new QLineEdit; documentSearch->setPlaceholderText("Find a vault document…"); browserLayout->addWidget(documentSearch);
+        documents=new QTableWidget(0,4); documents->setHorizontalHeaderLabels({"Document","Profile","Created","Updated"}); styleTable(documents); documents->setColumnWidth(0,280); documents->setColumnWidth(1,170); documents->setColumnWidth(2,155); documents->setColumnWidth(3,155); documents->setMinimumWidth(200); browserLayout->addWidget(documents,1);
+        connect(documentSearch,&QLineEdit::textChanged,this,[this] {filterDocuments();}); connect(documents->horizontalHeader(),&QHeaderView::sortIndicatorChanged,this,[this] {QTimer::singleShot(0,this,[this] {filterDocuments();});});
+        auto* documentActions=new QHBoxLayout; auto* openSaved=new QPushButton("Open"); auto* properties=new QPushButton("Properties…"); documentActions->addWidget(openSaved); documentActions->addWidget(properties); vaultMutationControls.append(properties); browserLayout->addLayout(documentActions);
+        auto* otherActions=new QHBoxLayout; auto* fresh=new QPushButton("New"); auto* removeSaved=new QPushButton("Delete…"); otherActions->addWidget(fresh); otherActions->addWidget(removeSaved); vaultMutationControls.append(removeSaved); browserLayout->addLayout(otherActions);
+        connect(fresh,&QPushButton::clicked,this,[this] {if((!input->toPlainText().isEmpty() || !output->toPlainText().isEmpty()) && QMessageBox::question(this,"New document","Discard unsaved Notepad text? Saved documents are unchanged.",QMessageBox::Discard|QMessageBox::Cancel,QMessageBox::Cancel)!=QMessageBox::Discard) return; input->clear(); output->clear(); currentDocumentId.clear(); currentDocumentTitle.clear(); currentDocumentProfile.clear(); outputIsEncrypted=false; clearVerificationIdentity(); updateDocumentContext(); tabs->setCurrentIndex(1); showNotepad(); input->setFocus();});
+        auto* refresh=new QPushButton("Refresh vault files"); browserLayout->addWidget(refresh); connect(refresh,&QPushButton::clicked,this,[this] {refreshDocuments();});
+        connect(openSaved,&QPushButton::clicked,this,[this] {openVaultDocument();}); connect(documents,&QTableWidget::cellDoubleClicked,this,[this](int,int) {openVaultDocument();});
+        connect(properties,&QPushButton::clicked,this,[this] {documentPropertiesDialog();}); connect(removeSaved,&QPushButton::clicked,this,[this] {deleteVaultDocument();});
+        connect(documents->horizontalHeader(),&QHeaderView::sortIndicatorChanged,this,[this] {QTimer::singleShot(0,this,[this] {filterDocuments();});});
+        documents->setContextMenuPolicy(Qt::CustomContextMenu); connect(documents,&QWidget::customContextMenuRequested,this,[this](const QPoint& point) {
+            const auto index=documents->indexAt(point); if(!index.isValid()) return; documents->selectRow(index.row());
+            const auto documentId=documents->item(index.row(),0)->data(Qt::UserRole).toString(); const auto profileId=activeProfile;
+            const auto copiedValue=documents->item(index.row(),index.column())->text(); const auto copiedRow=tableRowText(documents,index.row());
+            QMenu menu; auto* open=menu.addAction("Open"); auto* props=menu.addAction("Properties…"); props->setEnabled(!sessionReadOnly && !pending); auto* copy=menu.addAction("Copy value"); auto* row=menu.addAction("Copy row"); auto* text=menu.addAction("Copy document text"); text->setEnabled(!pending); menu.addSeparator(); auto* remove=menu.addAction("Delete…"); remove->setEnabled(!sessionReadOnly && !pending);
+            const auto selected=menu.exec(documents->viewport()->mapToGlobal(point)); if(!selected || ending || !unlocked) return;
+            if(selected==copy) {copySessionText(copiedValue); return;} if(selected==row) {copySessionText(copiedRow); return;} if(pending) return;
+            if(selected==text) {request("document_get",{{"document_id",documentId},{"profile_id",profileId}},[this](bool ok,const QJsonObject& data) {if(ok && unlocked && !ending) {copySessionText(data.value("text").toString()); statusBar()->showMessage("Document text copied.");}}); return;}
+            int current=-1; for(int candidate=0;candidate<documents->rowCount();++candidate) if(documents->item(candidate,0)->data(Qt::UserRole).toString()==documentId) {current=candidate; break;}
+            if(current<0) {statusBar()->showMessage("Document no longer appears in this view."); return;} documents->selectRow(current);
+            if(selected==open) openVaultDocument(); else if(selected==props) documentPropertiesDialog(); else if(selected==remove) deleteVaultDocument();
+        });
+        layout->addWidget(browser,1); tabs->addTab(page,"Saved notes");
+    }
+
 
     void clearVerificationIdentity() {if(verificationPopup) {verificationPopup->close(); verificationPopup.clear();} if(verificationIdentity) {verificationIdentity->clear(); verificationIdentity->hide();} statusBar()->setToolTip({});}
 
@@ -1595,18 +1661,23 @@ private:
                 documents->setItem(row,1,new TableItem(document.value("profile_id").toString().isEmpty()?QString("Unassigned"):profileTitle(document.value("profile_id").toString())));
                 for(int column=2;column<=3;++column) {const auto timestamp=document.value(column==2?"created_at":"updated_at").toInteger(); const auto date=QDateTime::fromSecsSinceEpoch(timestamp).toLocalTime(); auto* item=new TableItem(date.toString("yyyy-MM-dd HH:mm")); item->setData(Qt::UserRole+20,timestamp); item->setToolTip(date.toString(Qt::ISODate)); documents->setItem(row,column,item);}
             }
+            const auto oldRecent=recentDocuments->currentRow()<0?QString():recentDocuments->item(recentDocuments->currentRow(),0)->data(Qt::UserRole).toString();
+            QList<QJsonObject> recent; for(const auto& value:data.value("documents").toArray()) recent.append(value.toObject());
+            std::sort(recent.begin(),recent.end(),[](const QJsonObject& a,const QJsonObject& b) {const auto at=a.value("updated_at").toInteger(),bt=b.value("updated_at").toInteger(); return at==bt?a.value("id").toString()<b.value("id").toString():at>bt;});
+            recentDocuments->setRowCount(0);
+            for(int index=0;index<qMin(8,recent.size());++index) {const auto doc=recent[index]; recentDocuments->insertRow(index); auto* item=new TableItem(doc.value("title").toString()); item->setData(Qt::UserRole,doc.value("id").toString()); item->setToolTip(item->text()); recentDocuments->setItem(index,0,item); recentDocuments->setItem(index,1,new TableItem(QDateTime::fromSecsSinceEpoch(doc.value("updated_at").toInteger()).toLocalTime().toString("MM-dd HH:mm"))); if(doc.value("id").toString()==oldRecent) recentDocuments->selectRow(index);}
             documents->setSortingEnabled(true); filterDocuments(); for(int row=0;row<documents->rowCount();++row) if(documents->item(row,0)->data(Qt::UserRole).toString()==selected) documents->selectRow(row);
             if(after) after();
         });
     }
 
-    void openVaultDocument() {
-        if(pending || documents->currentRow()<0) return;
-        const auto id=documents->item(documents->currentRow(),0)->data(Qt::UserRole).toString();
+    void openVaultDocument(QString id = {}) {
+        if(pending) return;
+        if(id.isEmpty()) {if(documents->currentRow()<0) return; id=documents->item(documents->currentRow(),0)->data(Qt::UserRole).toString();}
         if(!testing && (!input->toPlainText().isEmpty() || !output->toPlainText().isEmpty()) && QMessageBox::question(this,"Open saved document","Replace the current unsaved Notepad text? Saved vault documents are unchanged.",QMessageBox::Open|QMessageBox::Cancel,QMessageBox::Cancel)!=QMessageBox::Open) return;
         request("document_get",{{"document_id",id},{"profile_id",activeProfile}},[this](bool ok,const QJsonObject& data) {
             if(!ok) return;
-            currentDocumentId=data.value("id").toString(); currentDocumentTitle=data.value("title").toString(); currentDocumentProfile=data.value("profile_id").toString(); input->setPlainText(data.value("text").toString()); output->clear(); outputIsEncrypted=false; clearVerificationIdentity(); updateDocumentContext(); statusBar()->showMessage("Opened from encrypted vault. Edits are not saved automatically.");
+            currentDocumentId=data.value("id").toString(); currentDocumentTitle=data.value("title").toString(); currentDocumentProfile=data.value("profile_id").toString(); input->setPlainText(data.value("text").toString()); output->clear(); outputIsEncrypted=false; clearVerificationIdentity(); updateDocumentContext(); tabs->setCurrentIndex(1); showNotepad(); statusBar()->showMessage("Opened from encrypted vault. Edits are not saved automatically.");
         });
     }
 
@@ -1685,17 +1756,22 @@ private:
         dialog.setAcceptMode(save?QFileDialog::AcceptSave:QFileDialog::AcceptOpen);
         dialog.setFileMode(save?QFileDialog::AnyFile:QFileDialog::ExistingFile);
         dialog.setNameFilters({"Messages (*.asc *.pgp *.txt)","All files (*)"});
+        if(!preferences.value("allow_removable_media").toBool()) {dialog.setProxyModel(new ExternalFileFilter(&dialog)); dialog.setSidebarUrls({QUrl::fromLocalFile(QDir::homePath()),QUrl::fromLocalFile("/")});}
         if(save) dialog.setDefaultSuffix(armored?"asc":"txt");
         if(dialog.exec()!=QDialog::Accepted || dialog.selectedFiles().isEmpty()) return {};
-        return QFileInfo(dialog.selectedFiles().first()).absoluteFilePath();
+        const auto chosen=QFileInfo(dialog.selectedFiles().first()).absoluteFilePath();
+        if(!ExternalFilePolicy::allowed(chosen,preferences.value("allow_removable_media").toBool())) {fail("Removable-media message access is off. Enable it in Vault settings to use this location."); return {};}
+        return chosen;
     }
 
     bool loadMessageFile(const QString& filename) {
+        if(!ExternalFilePolicy::allowed(filename,preferences.value("allow_removable_media").toBool())) {fail("Message import from removable media is disabled in Vault settings."); return false;}
         const auto encoded=QFile::encodeName(filename);
         const int descriptor=::open(encoded.constData(),O_RDONLY|O_NOFOLLOW|O_CLOEXEC|O_NONBLOCK);
         if(descriptor<0) {fail("Cannot open message. Choose a readable file, not a symbolic link."); return false;}
         struct stat metadata{};
         if(::fstat(descriptor,&metadata)!=0 || !S_ISREG(metadata.st_mode) || metadata.st_size<0 || metadata.st_size>MaxMessageInput) {::close(descriptor); fail("Choose a regular text message no larger than 4 MiB."); return false;}
+        if(!preferences.value("allow_removable_media").toBool() && ExternalFilePolicy::removableDevice(metadata.st_dev)) {::close(descriptor); fail("Message import from removable media is disabled."); return false;}
         QFile file;
         if(!file.open(descriptor,QIODevice::ReadOnly,QFileDevice::AutoCloseHandle)) {::close(descriptor); fail("Cannot read message."); return false;}
         auto bytes=file.read(MaxMessageInput+1);
@@ -1707,6 +1783,8 @@ private:
     }
 
     bool saveOutputFile(const QString& filename) {
+        if(ephemeralLocation(filename)) {fail("Choose a persistent output folder outside sandbox state and /tmp."); return false;}
+        if(!ExternalFilePolicy::allowed(filename,preferences.value("allow_removable_media").toBool())) {fail("Message export to removable media is disabled in Vault settings."); return false;}
         const auto target=QFileInfo(filename).absoluteFilePath();
         const auto vaultPath=activeVaultPath;
         for(const auto& reserved:QStringList{vaultPath,vaultPath+".lock",vaultPath+".pgpcrypt-emergency",vaultPath+".pgpcrypt-dummy",vaultPath+".pgpcrypt-protection",vaultPath+".pgpcrypt-expiry"}) {
@@ -1820,16 +1898,28 @@ private:
         socket->connectToServer(rpcPath);
     }
 
+    bool testKeyCreationDefaults() {
+        bool valid=false;
+        QTimer::singleShot(0,this,[this,&valid] {
+            auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget()); if(!dialog) return;
+            QList<QCheckBox*> capabilities; QCheckBox* expiry=nullptr;
+            for(auto* check:dialog->findChildren<QCheckBox*>()) {if(check->text()=="Expire on") expiry=check; else capabilities.append(check);}
+            valid=capabilities.size()==4 && expiry && !expiry->isChecked();
+            for(auto* check:capabilities) valid=valid && check->isChecked() && check->parentWidget()==capabilities.first()->parentWidget();
+            const auto dates=dialog->findChildren<QDateTimeEdit*>(); valid=valid && dates.size()==1 && !dates.first()->isEnabled(); dialog->reject();
+        });
+        createKeyDialog(); if(!valid) fail("Key capability alignment/defaults or expiry default failed"); return valid;
+    }
+
     bool testNotepadWindow() {
-        if(!notepadPopout || !notepadWindow || notepadPage->parentWidget()!=notepadWindow) {fail("Default Notepad window was not prepared"); return false;}
+        if(notepadPopout || !tabs->widget(1)->isAncestorOf(input)) {fail("Notepad is not embedded by default"); return false;}
         auto* sameInput=input; input->setPlainText("Shared Notepad text fixture"); tabs->setCurrentIndex(1);
-        if(!notepadWindow->isVisible()) {fail("Notepad navigation did not open its window"); return false;}
         auto value=preferences; value.insert("notepad_popout",false); applyPreferences(value);
         if(input!=sameInput || !tabs->widget(1)->isAncestorOf(input) || input->toPlainText()!="Shared Notepad text fixture") {fail("Embedding Notepad lost its shared editor"); return false;}
         value.insert("notepad_popout",true); applyPreferences(value);
         if(input!=sameInput || !notepadWindow->isAncestorOf(input) || input->toPlainText()!="Shared Notepad text fixture") {fail("Detaching Notepad lost its shared editor"); return false;}
         notepadWindow->close(); if(notepadWindow->isVisible() || tabs->currentIndex()!=0 || input->toPlainText()!="Shared Notepad text fixture") {fail("Closing Notepad lost text or failed to return to Keys"); return false;}
-        input->clear(); return true;
+        value.insert("notepad_popout",false); applyPreferences(value); input->clear(); return true;
     }
 
     bool testSafeActivity() {
@@ -1838,7 +1928,13 @@ private:
         activityLog->record(ActivityEvent::OperationFailed); activityLog->setWarningsOnly(true);
         const auto text=activityLog->toPlainText();
         if(activityLog->document()->blockCount()>200 || !activityLog->warningsOnly() || text.contains(testFingerprint) || text.contains("fixture@example.invalid") || text.contains(activeVaultPath) || text.contains("dummy",Qt::CaseInsensitive) || text.contains("protection",Qt::CaseInsensitive) || text.contains("password",Qt::CaseInsensitive)) {fail("Activity history leaked details or exceeded its bound"); return false;}
-        activityLog->setWarningsOnly(false); activityLog->clear(); activityLog->record(ActivityEvent::SessionReady); return true;
+        activityLog->setWarningsOnly(false); resetActivity();
+        if(activityLog->document()->blockCount()!=1 || !activityLog->toPlainText().contains("READY")) {fail("Clearing activity did not restore Ready"); return false;}
+        // Timer off still clears our last copy; do not erase unrelated text.
+        copySessionText("disposable clipboard fixture"); clearSessionClipboard();
+        if(!qApp->clipboard()->text().isEmpty()) {fail("Session clipboard cleanup failed with timer off"); return false;}
+        for(const auto& id:QStringList{"ruby-dark","ruby-light","terminal-green","cyberpunk"}) {auto value=preferences; value.insert("theme",id); applyPreferences(value); if(qApp->palette().color(QPalette::Text).lightness()==qApp->palette().color(QPalette::Base).lightness()) {fail("Theme text has no contrast"); return false;}}
+        return true;
     }
 
     bool testReadOnlyControls() {
@@ -1853,8 +1949,8 @@ private:
     }
 
     void testSettingsAndQubes(std::function<void()> after) {
-        if(!testReadOnlyControls() || !testNotepadWindow() || !testSafeActivity()) return;
-        if(autoLock || focusLock || sessionLock || clipboardSeconds!=0 || tabs->count()!=4 || navigationButtons.size()!=4) {fail("New-vault default settings or notes removal failed"); return;}
+        if(!testReadOnlyControls() || !testNotepadWindow() || !testSafeActivity() || !testKeyCreationDefaults()) return;
+        if(autoLock || focusLock || sessionLock || clipboardSeconds!=0 || tabs->count()!=5 || navigationButtons.size()!=5) {fail("New-vault default settings or notes removal failed"); return;}
         QEvent deactivate(QEvent::ApplicationDeactivate); QCoreApplication::sendEvent(qApp,&deactivate);
         if(ending) {fail("Focus loss locked with opt-in disabled"); return;}
         if(keys->contextMenuPolicy()!=Qt::CustomContextMenu || recipientChoices->contextMenuPolicy()!=Qt::CustomContextMenu || profileMembers->contextMenuPolicy()!=Qt::CustomContextMenu) {fail("Key quick-action menus are missing"); return;}
@@ -2025,7 +2121,7 @@ private:
                     request("document_save",{{"title","Vault document fixture"},{"text","Saved only inside the vault"},{"profile_id",included}},[this,after,included](bool ok,const QJsonObject&) {
                         if(!ok) return;
                         refreshDocuments([this,after,included] {
-                            if(documents->rowCount()!=1 || profileDocumentCounts.value(included).toInteger()!=1) {fail("Vault document browser or identity counts did not populate"); return;}
+                            if(documents->rowCount()!=1 || recentDocuments->rowCount()!=1 || notepadPage->isAncestorOf(documents) || !tabs->widget(3)->isAncestorOf(documents) || recentDocuments->item(0,0)->data(Qt::UserRole)!=documents->item(0,0)->data(Qt::UserRole) || profileDocumentCounts.value(included).toInteger()!=1) {fail("Vault document browser or identity counts did not populate"); return;}
                             documents->selectRow(0); const auto id=documents->item(0,0)->data(Qt::UserRole).toString();
                             request("document_get",{{"document_id",id},{"profile_id",included}},[this,after,id](bool ok,const QJsonObject& data) {
                                 if(!ok || data.value("text").toString()!="Saved only inside the vault") {fail("Saved document did not reopen"); return;}
@@ -2053,7 +2149,7 @@ private:
                     input->setPlainText(signedText);
                     textAction("verify",[this,signedText] {
                         auto* comparison=verificationPopup?verificationPopup->findChild<QTableWidget*>("verificationComparison"):nullptr;
-                        if(output->toPlainText()!="Qt signature fixture" || !verificationIdentity->text().contains("Desktop fixture") || !verificationIdentity->text().contains(testFingerprint) || !statusBar()->currentMessage().contains("Desktop fixture") || !statusBar()->currentMessage().contains(testFingerprint) || !copyOutput->isEnabled() || !verificationPopup || !verificationPopup->property("verificationPassed").toBool() || !comparison || comparison->item(1,0)->text()!=testFingerprint || comparison->item(1,1)->text()!=testFingerprint) {fail("Verification popup or identity comparison mismatch"); return;}
+                        if(output->toPlainText()!="Qt signature fixture" || !verificationIdentity->text().contains("Desktop fixture") || !verificationIdentity->text().contains(testFingerprint) || !statusBar()->currentMessage().contains("Desktop fixture") || !statusBar()->currentMessage().contains(testFingerprint) || !copyOutput->isEnabled() || !verificationPopup || !verificationPopup->property("verificationPassed").toBool() || !comparison || comparison->item(0,2)->text()!=testFingerprint || comparison->item(1,2)->text()!=testFingerprint) {fail("Verification popup or identity comparison mismatch"); return;}
                         auto altered=signedText; altered.replace("Qt signature fixture","Qt altered fixture"); input->setPlainText(altered);
                         textAction("verify",[this,signedText] {
                             if(!verificationPopup || verificationPopup->property("verificationPassed").toBool() || verificationPopup->findChild<QTableWidget*>("verificationComparison") || !output->toPlainText().isEmpty() || !statusBar()->currentMessage().contains("FAILED") || verificationIdentity->text().contains(testFingerprint)) {fail("Invalid signature retained successful verification state"); return;}
@@ -2080,7 +2176,7 @@ private:
                 tabs->setCurrentIndex(screenshotPath.isEmpty()?0:1);
                 QTimer::singleShot(100,this,[this] {
                     if(!screenshotPath.isEmpty() && !(notepadPopout && notepadWindow && notepadWindow->isVisible()?notepadWindow->grab():grab()).save(screenshotPath)) {fail("Screenshot failed"); return;}
-                    endSession(true);
+                    copySessionText("disposable lock clipboard fixture"); endSession(true);
                 });
             });
         });

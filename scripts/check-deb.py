@@ -62,6 +62,7 @@ def main():
         assert not (stage / "etc/qubes/policy.d").exists(), "Never install dom0 policy in a guest package"
         dependencies = checked(["dpkg-deb", "-f", str(archive), "Depends"])
         assert "rustc" not in dependencies and "cargo" not in dependencies and "rustup" not in dependencies
+        assert "bubblewrap" in dependencies
         assert "libzxcvbn0" in dependencies
         assert "libssl3t64 (>= 3.5.7-1~deb13u3)" in dependencies
         assert (stage / "usr/share/doc/pgpcrypt/third-party-licenses/age-0.12.1").is_dir()

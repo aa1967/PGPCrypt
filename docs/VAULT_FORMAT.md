@@ -1,4 +1,4 @@
-# Vault format: age v1 plus encrypted schema 7
+# Vault format: age v1 plus encrypted schema 8
 
 The outer container is the unmodified [age v1 format](https://age-encryption.org/v1),
 implemented by `age` 0.12.1. The app defines no crypto header, nonce format,
@@ -20,7 +20,7 @@ After complete authenticated decryption, the plaintext is UTF-8 JSON:
 ```json
 {
   "application": "PGPCrypt",
-  "schema": 7,
+  "schema": 8,
   "data": {
     "certificates": [],
     "notes": "",
@@ -36,7 +36,10 @@ After complete authenticated decryption, the plaintext is UTF-8 JSON:
       "clipboard_clear_seconds": 0,
       "theme": "light",
       "qubes_rpc": false,
-      "notepad_popout": true
+      "notepad_popout": false,
+      "activity_clear_seconds": 0,
+      "show_session_stats": false,
+      "allow_removable_media": false
     }
   }
 }
@@ -51,13 +54,14 @@ does not apply it. `idle_timeout_seconds` ranges from 60 to 3600.
 Schema-1 vaults are read with empty revocations and a 300-second timeout.
 Schemas 1 and 2 default to no saved signing key. Schemas 1–3 default to all
 automatic locking, clipboard wiping and RPC options off. Every save writes
-schema 7 with encrypted preferences, identity fields, profiles and documents. Schemas 1–4
+schema 8 with encrypted preferences, identity fields, profiles and documents. Schemas 1–4
 default to empty profiles/documents. `default_signing_key` is empty for no
 default; inactivity duration remains 60–3600 seconds but has no effect until
 `preferences.auto_lock` is enabled. Clipboard delay is 0 (off) or 5–1800 seconds.
-Schemas 1–5 default missing identity fields to empty strings. Schemas 1–6
-default the missing `preferences.notepad_popout` option to true; this controls
-window layout and adds no independent worker or copy of the editor state. Older PGPCrypt releases reject schema 7; preserve a backup before upgrading. Unknown fields and unsupported versions are rejected.
+Schemas 1–5 default missing identity fields to empty strings. Missing `preferences.notepad_popout` now defaults to false; explicitly stored
+values remain unchanged. Schema 8 adds optional activity/media/counter preferences;
+activity clearing is 0 or 5–3600 seconds and counters/media default off. The Notepad option controls
+window layout and adds no independent worker or copy of the editor state. Older PGPCrypt releases reject schema 8; preserve a backup before upgrading. Unknown fields and unsupported versions are rejected.
 The schema version is private, separate from the public age format version.
 
 The writer pads JSON with spaces to a 4096-byte boundary inside encryption.

@@ -4,6 +4,7 @@
 // than worker replies, operation names or user data. Nothing is written to disk.
 #include <QApplication>
 #include <QClipboard>
+#include <QCryptographicHash>
 #include <QColor>
 #include <QDateTime>
 #include <QDialog>
@@ -25,6 +26,32 @@
 #include <QTextDocument>
 #include <QVBoxLayout>
 
+// Track only a digest, never a second plaintext clipboard copy. Qt's ownership
+// reporting varies across backends; a matching digest also covers offscreen Qt.
+inline const char* clipboardDigestProperty(QClipboard::Mode mode) {
+    return mode == QClipboard::Selection ? "pgpcryptSelectionDigest" : "pgpcryptClipboardDigest";
+}
+inline QByteArray clipboardDigest(QClipboard::Mode mode) {
+    auto bytes = QApplication::clipboard()->text(mode).toUtf8();
+    auto digest = QCryptographicHash::hash(bytes, QCryptographicHash::Sha256);
+    bytes.fill('\0'); return digest;
+}
+inline bool sessionClipboard(QClipboard::Mode mode = QClipboard::Clipboard) {
+    auto* clipboard = QApplication::clipboard();
+    const auto saved = qApp->property(clipboardDigestProperty(mode)).toByteArray();
+    return (mode == QClipboard::Selection ? clipboard->ownsSelection() : clipboard->ownsClipboard())
+        || (!saved.isEmpty() && saved == clipboardDigest(mode));
+}
+inline void copySessionText(const QString& text, QClipboard::Mode mode = QClipboard::Clipboard) {
+    auto bytes = text.toUtf8();
+    qApp->setProperty(clipboardDigestProperty(mode), QCryptographicHash::hash(bytes, QCryptographicHash::Sha256));
+    bytes.fill('\0'); QApplication::clipboard()->setText(text, mode);
+}
+inline void clearSessionClipboard(QClipboard::Mode mode = QClipboard::Clipboard) {
+    if (sessionClipboard(mode)) QApplication::clipboard()->clear(mode);
+    qApp->setProperty(clipboardDigestProperty(mode), QVariant());
+}
+
 enum class ActivityEvent {
     SessionReady,
     OperationComplete,
@@ -32,6 +59,11 @@ enum class ActivityEvent {
     DecryptionComplete,
     SigningComplete,
     KeyUpdated,
+    KeyCreated,
+    KeyImported,
+    SubkeyAdded,
+    PreferencesSaved,
+    DocumentChanged,
     OperationFailed,
     VerificationPassed,
     VerificationFailed,
@@ -102,6 +134,16 @@ public:
             message = "OK     Message decryption completed."; color = QColor("#8de3a0"); break;
         case ActivityEvent::SigningComplete:
             message = "OK     Message signing completed."; color = QColor("#8de3a0"); break;
+        case ActivityEvent::KeyCreated:
+            message = "OK     New key and revocation certificate saved."; color = QColor("#8de3a0"); break;
+        case ActivityEvent::KeyImported:
+            message = "OK     Key import completed."; color = QColor("#8de3a0"); break;
+        case ActivityEvent::SubkeyAdded:
+            message = "OK     New subkey saved."; color = QColor("#8de3a0"); break;
+        case ActivityEvent::PreferencesSaved:
+            message = "OK     Vault preferences saved."; color = QColor("#8de3a0"); break;
+        case ActivityEvent::DocumentChanged:
+            message = "OK     Saved-note collection updated."; color = QColor("#8de3a0"); break;
         case ActivityEvent::KeyUpdated:
             message = "OK     Key changes saved."; color = QColor("#8de3a0"); break;
         case ActivityEvent::OperationFailed:
@@ -165,14 +207,14 @@ inline QDialog* showVerificationDialog(QWidget* parent, bool passed,
     layout->addWidget(result);
 
     if (verified) {
-        auto* explanation = new QLabel("Compare the authenticated signing certificate with the key stored in this vault:");
+        auto* explanation = new QLabel("Compare the input signature’s resolved signer with the stored vault key. Names come from the matching certificate, not independently from the message:");
         explanation->setTextFormat(Qt::PlainText);
         explanation->setWordWrap(true);
         layout->addWidget(explanation);
 
-        auto* comparison = new QTableWidget(signerDetails.size() * 2, 2, dialog);
+        auto* comparison = new QTableWidget(signerDetails.size() * 2, 3, dialog);
         comparison->setObjectName("verificationComparison");
-        comparison->setHorizontalHeaderLabels({"Verified signing certificate", "Stored vault certificate"});
+        comparison->setHorizontalHeaderLabels({"Source", "Identity", "Full primary fingerprint"});
         comparison->setEditTriggers(QAbstractItemView::NoEditTriggers);
         comparison->setSelectionMode(QAbstractItemView::SingleSelection);
         comparison->setSelectionBehavior(QAbstractItemView::SelectItems);
@@ -181,7 +223,7 @@ inline QDialog* showVerificationDialog(QWidget* parent, bool passed,
         comparison->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);
         comparison->horizontalHeader()->setMinimumSectionSize(150);
         comparison->horizontalHeader()->setStretchLastSection(true);
-        comparison->setColumnWidth(0,410); comparison->setColumnWidth(1,410);
+        comparison->setColumnWidth(0,180); comparison->setColumnWidth(1,240); comparison->setColumnWidth(2,450);
         comparison->verticalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
         comparison->verticalHeader()->setMinimumSectionSize(35);
         QStringList rows;
@@ -208,13 +250,15 @@ inline QDialog* showVerificationDialog(QWidget* parent, bool passed,
                 : storedIdentities.isEmpty() ? QString("No current valid identity") : storedIdentities.join("\n");
             const auto storedFingerprint = stored.isEmpty() ? QString("Not available") : stored.value("fingerprint").toString();
             const auto ordinal = QString::number(row / 2 + 1);
-            rows.append("Signer " + ordinal + " · identity");
-            rows.append("Signer " + ordinal + " · fingerprint");
-            comparison->setItem(row, 0, new QTableWidgetItem(verifiedName));
-            comparison->setItem(row, 1, new QTableWidgetItem(storedName));
-            comparison->setItem(row + 1, 0, new QTableWidgetItem(fingerprint));
-            comparison->setItem(row + 1, 1, new QTableWidgetItem(storedFingerprint));
-            for (int column = 0; column < 2; ++column) comparison->item(row + 1, column)->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+            rows.append("Signer " + ordinal);
+            rows.append("Signer " + ordinal);
+            comparison->setItem(row, 0, new QTableWidgetItem("Input signature"));
+            comparison->setItem(row + 1, 0, new QTableWidgetItem("Vault key"));
+            comparison->setItem(row, 1, new QTableWidgetItem(verifiedName));
+            comparison->setItem(row + 1, 1, new QTableWidgetItem(storedName));
+            comparison->setItem(row, 2, new QTableWidgetItem(fingerprint));
+            comparison->setItem(row + 1, 2, new QTableWidgetItem(storedFingerprint));
+            for (int offset = 0; offset < 2; ++offset) comparison->item(row + offset, 2)->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
             row += 2;
         }
         comparison->setVerticalHeaderLabels(rows);
@@ -226,15 +270,15 @@ inline QDialog* showVerificationDialog(QWidget* parent, bool passed,
             const auto copiedValue = item->text();
             QStringList copiedRows;
             for (int index = 0; index < comparison->rowCount(); ++index)
-                copiedRows.append(comparison->verticalHeaderItem(index)->text() + "\t" + comparison->item(index, 0)->text() + "\t" + comparison->item(index, 1)->text());
+                copiedRows.append(comparison->verticalHeaderItem(index)->text() + "\t" + comparison->item(index, 0)->text() + "\t" + comparison->item(index, 1)->text() + "\t" + comparison->item(index, 2)->text());
             QPointer<QTableWidget> guardedComparison(comparison);
             QMenu menu;
             auto* copyValue = menu.addAction("Copy value");
-            auto* copyBoth = menu.addAction("Copy both columns");
+            auto* copyBoth = menu.addAction("Copy comparison");
             const auto selected = menu.exec(comparison->viewport()->mapToGlobal(point));
             if (!guardedComparison || !guardedComparison->isVisible()) return;
-            if (selected == copyValue) QApplication::clipboard()->setText(copiedValue);
-            else if (selected == copyBoth) QApplication::clipboard()->setText(copiedRows.join("\n"));
+            if (selected == copyValue) copySessionText(copiedValue);
+            else if (selected == copyBoth) copySessionText(copiedRows.join("\n"));
         });
         layout->addWidget(comparison, 1);
         auto* match = new QLabel(everyStoredMatch ? "Full fingerprints match the corresponding stored certificates."

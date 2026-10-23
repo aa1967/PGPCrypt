@@ -1,5 +1,5 @@
 //! Standard age v1 or KDBX 4.1 encrypted containers; atomic ciphertext persistence.
-use age::secrecy::SecretString;
+use crate::memory::LockedPassword;
 use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -41,13 +41,15 @@ pub struct Preferences {
     pub theme: String,
     #[serde(default)]
     pub qubes_rpc: bool,
-    #[serde(default = "default_notepad_popout")]
+    #[serde(default)]
     pub notepad_popout: bool,
+    #[serde(default)]
+    pub activity_clear_seconds: u32,
+    #[serde(default)]
+    pub show_session_stats: bool,
+    #[serde(default)]
+    pub allow_removable_media: bool,
 }
-fn default_notepad_popout() -> bool {
-    true
-}
-
 fn default_theme() -> String {
     "light".into()
 }
@@ -60,7 +62,10 @@ impl Default for Preferences {
             clipboard_clear_seconds: 0,
             theme: "light".into(),
             qubes_rpc: false,
-            notepad_popout: true,
+            notepad_popout: false,
+            activity_clear_seconds: 0,
+            show_session_stats: false,
+            allow_removable_media: false,
         }
     }
 }
@@ -69,6 +74,10 @@ impl Preferences {
         ensure!(
             self.clipboard_clear_seconds == 0 || (5..=1800).contains(&self.clipboard_clear_seconds),
             "Clipboard interval must be disabled or 5 seconds to 30 minutes"
+        );
+        ensure!(
+            self.activity_clear_seconds == 0 || (5..=3600).contains(&self.activity_clear_seconds),
+            "Activity clearing must be off or 5 seconds to one hour"
         );
         ensure!(
             matches!(
@@ -80,6 +89,10 @@ impl Preferences {
                     | "solarized-light"
                     | "solarized-dark"
                     | "solarized"
+                    | "ruby-dark"
+                    | "ruby-light"
+                    | "terminal-green"
+                    | "cyberpunk"
             ),
             "Unsupported theme"
         );
@@ -441,7 +454,7 @@ pub struct Vault {
     path: PathBuf,
     // age regenerates the file key and salt on every save, so its passphrase is
     // retained in a zeroizing secret while unlocked. It never returns to the UI.
-    passphrase: SecretString,
+    passphrase: LockedPassword,
     _lock: File,
     format: VaultFormat,
     kdbx: Option<Box<keepass::Database>>,
@@ -571,7 +584,7 @@ impl Vault {
         let vault = Self {
             data,
             path,
-            passphrase: SecretString::from(password.to_owned()),
+            passphrase: LockedPassword::new(password),
             _lock: lock,
             format,
             kdbx: None,
@@ -612,7 +625,7 @@ impl Vault {
             return Ok(Self {
                 data,
                 path,
-                passphrase: SecretString::from(password.to_owned()),
+                passphrase: LockedPassword::new(password),
                 _lock: lock,
                 format: VaultFormat::Kdbx,
                 kdbx: Some(Box::new(db)),
@@ -626,8 +639,8 @@ impl Vault {
             decryptor.is_scrypt(),
             "Vault requires age passphrase encryption"
         );
-        let passphrase = SecretString::from(password.to_owned());
-        let mut identity = age::scrypt::Identity::new(passphrase.clone());
+        let passphrase = LockedPassword::new(password);
+        let mut identity = age::scrypt::Identity::new(passphrase.secret_copy());
         identity.set_max_work_factor(WORK_FACTOR);
         let reader = decryptor
             .decrypt(std::iter::once(&identity as &dyn age::Identity))
@@ -643,7 +656,7 @@ impl Vault {
         // No decoded data is exposed until the complete age stream authenticates.
         let stored: Stored = serde_json::from_slice(&plaintext).context("Invalid vault schema")?;
         ensure!(
-            stored.application == "PGPCrypt" && matches!(stored.schema, 1..=7),
+            stored.application == "PGPCrypt" && matches!(stored.schema, 1..=8),
             "Unsupported vault schema"
         );
         ensure!(
@@ -690,7 +703,7 @@ impl Vault {
         Ok(Self {
             data: VaultData::default(),
             path,
-            passphrase: SecretString::from(String::new()),
+            passphrase: LockedPassword::new(""),
             _lock: lock,
             format,
             kdbx: None,
@@ -706,8 +719,7 @@ impl Vault {
     /// Authenticate against the already unlocked vault credential without a
     /// second decryption or returning that credential through worker IPC.
     pub fn authenticate_password(&self, password: &str) -> bool {
-        use age::secrecy::ExposeSecret;
-        crate::password::matches(password, self.passphrase.expose_secret())
+        crate::password::matches(password, self.passphrase.as_str())
     }
 
     pub fn protection_enabled(&self) -> Result<bool> {
@@ -776,11 +788,10 @@ impl Vault {
     }
 
     pub fn emergency_configure(&self, password: &str) -> Result<()> {
-        use age::secrecy::ExposeSecret;
         ensure!(!self.read_only, "Vault is read-only");
         crate::password::validate_new_password(password)?;
         ensure!(
-            !crate::password::matches(password, self.passphrase.expose_secret()),
+            !crate::password::matches(password, self.passphrase.as_str()),
             "Choose an emergency password different from the vault password"
         );
         self.check_unchanged()?;
@@ -801,11 +812,10 @@ impl Vault {
     }
 
     pub fn dummy_configure(&self, password: &str) -> Result<()> {
-        use age::secrecy::ExposeSecret;
         ensure!(!self.read_only, "Vault is read-only");
         crate::password::validate_new_password(password)?;
         ensure!(
-            !crate::password::matches(password, self.passphrase.expose_secret()),
+            !crate::password::matches(password, self.passphrase.as_str()),
             "Choose a dummy password different from the vault password"
         );
         self.check_unchanged()?;
@@ -869,7 +879,7 @@ impl Vault {
         }
         let mut plaintext = Zeroizing::new(serde_json::to_vec(&StoredRef {
             application: "PGPCrypt",
-            schema: 7,
+            schema: 8,
             data: &self.data,
         })?);
         let size = plaintext.len().div_ceil(PAD) * PAD;
@@ -886,16 +896,15 @@ impl Vault {
         })?;
         match self.format {
             VaultFormat::Kdbx => {
-                use age::secrecy::ExposeSecret;
                 crate::kdbx::write(
                     &self.data,
                     self.kdbx.as_deref(),
-                    self.passphrase.expose_secret(),
+                    self.passphrase.as_str(),
                     temp.as_file_mut(),
                 )?;
             }
             VaultFormat::Age => {
-                let mut recipient = age::scrypt::Recipient::new(self.passphrase.clone());
+                let mut recipient = age::scrypt::Recipient::new(self.passphrase.secret_copy());
                 recipient.set_work_factor(WORK_FACTOR);
                 let encryptor = age::Encryptor::with_recipients(std::iter::once(
                     &recipient as &dyn age::Recipient,

@@ -213,6 +213,7 @@ impl Session {
                 matches!(
                     request.op.as_str(),
                     "status"
+                        | "security_status"
                         | "list"
                         | "profiles_list"
                         | "documents_list"
@@ -233,6 +234,7 @@ impl Session {
         }
         match request.op.as_str() {
             "status" => Ok(json!({"unlocked": self.vault.is_some()})),
+            "security_status" => Ok(serde_json::to_value(crate::memory::status())?),
             "create" | "open" => {
                 ensure!(self.vault.is_none(), "Lock the current vault first");
                 self.vault = Some(if request.op == "create" {
@@ -264,7 +266,7 @@ impl Session {
                     ""
                 };
                 Ok(
-                    json!({"unlocked":true,"read_only":self.vault()?.is_read_only(),"protection_warning":protection_warning,"format":self.vault()?.format().name(),"idle_timeout_seconds":self.vault()?.data.idle_timeout_seconds,"default_signing_key":self.vault()?.data.default_signing_key,"preferences":self.vault()?.data.preferences}),
+                    json!({"unlocked":true,"read_only":self.vault()?.is_read_only(),"protection_warning":protection_warning,"format":self.vault()?.format().name(),"idle_timeout_seconds":self.vault()?.data.idle_timeout_seconds,"default_signing_key":self.vault()?.data.default_signing_key,"preferences":self.vault()?.data.preferences,"security":crate::memory::status()}),
                 )
             }
             "convert_copy" => {
