@@ -1,5 +1,52 @@
 # Validation history
 
+## Alpha12 evidence
+
+Source `5a874d3`, namespace-check correction `75dea4b`, and launcher/policy
+coverage `dd63aa2` were pushed before their affected functional checks.
+All **75 Rust checks** passed: 59 core, 4 protection protocol, 1 GnuPG interop
+and 11 worker/lifecycle checks. This includes dedicated secret-page separation,
+exact UTF-8/empty passwords, path-free swap reporting, preference bounds,
+new theme persistence, legacy reads, key authentication and corruption guards.
+Formatting, all-target/all-feature Clippy and Qt warnings-as-errors compilation
+passed. No Git hooks or pre-push functional tests were used.
+
+Independent age interoperability passed for current encrypted schema 8 and
+legacy schemas 1–7. KeePassXC 2.7.10 passed protected key/document/identity-group
+reads, field/group edits, membership references, stale-write refusal and age
+conversion with KDBX settings schema 7. Crypto formats and KDF parameters did
+not change. Old explicit Notepad layout preferences remain honored.
+
+The actual Debian package passed both Qt vault workflows and supervisor restart:
+embedded-by-default and shared detached Notepad, a separate Saved notes table
+and matching recent-document IDs, key capability alignment/all-selected defaults,
+expiry off, valid/altered signature rows and recovery, sanitized activity bounds,
+clear-to-Ready, private-key authorization and clipboard cleanup with its timer
+off. Package checks covered ELF dependencies/no RPATH, ownership/modes,
+Bubblewrap dependency, sources/licenses, Qubes handlers and permission guidance.
+The four new palettes have text/selection contrast ratios above 4.5:1.
+
+The real release worker reported locked selected buffers and no active swap on
+this runner. A separate child restricted to RLIMIT_MEMLOCK=0 correctly reported
+locking unavailable, without aborting or claiming protection. Unit checks cover
+active/unknown swap parsing without returning device names. GUI/library/KDF/key
+packet copies are not all locked.
+
+Removable-media policy checks passed ordinary files, conventional mount paths,
+real symlink aliases, missing output targets and explicit opt-in. Launcher
+checks passed temporary-state arguments, spaced home paths, symlink refusal,
+D-Bus address blocking and namespace-error propagation. **Live Bubblewrap
+isolation could not run:** an independent namespace capability probe failed
+with `bwrap: setting up uid map: Read-only file system` on this cloud runner.
+The packaged launcher remains fail-closed. Offscreen GUI checks directly
+executed the packaged UI/worker; they do not establish live sandbox behavior.
+
+No system installation, native compositor/clipboard manager, real USB hardware,
+or real Qubes transport was exercised. Desktop D-Bus lock/suspend signals are
+blocked by the wrapper. See SANDBOX.md for these limits; this evidence is not an
+independent security audit. Final documentation repackaging must retain all
+validated executable and launcher hashes.
+
 ## Alpha11 evidence
 
 Source `643d120` and follow-up fixes `2dbe6c6`, `656b8f2`, `5d103ca` and
