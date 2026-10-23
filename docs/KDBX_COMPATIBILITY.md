@@ -61,8 +61,9 @@ entries remain schema 1. Older settings are read with defaults for missing field
 Qubes opt-in; all new automatic behaviors default off.
 Protected `PGPCrypt.Profiles` contains stable identity IDs and the PGPCrypt
 profile metadata snapshot. Each identity is also a **real child group** of
-`PGPCrypt`, with a stable `PGPCrypt.ProfileId` in group custom data and strict structural
-markers. Its name is the identity name; renaming that group in KeePassXC updates
+`PGPCrypt`, with a stable `PGPCrypt.ProfileId` in group custom data and strict
+structural markers. This group marker uses `profile:<32hex>` to distinguish it
+from binary custom data; entry fields and profile JSON retain the bare 32-hex ID. Its name is the identity name; renaming that group in KeePassXC updates
 the identity when PGPCrypt opens it. The group contains:
 
 - **Identity details**, an ordinary entry with protected UserName, Email, URL

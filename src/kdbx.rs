@@ -544,17 +544,27 @@ fn identity_group_id(group: &Group) -> Result<&str> {
         "Unknown group inside PGPCrypt; move unrelated groups outside PGPCrypt"
     );
     match field(PROFILE_ID) {
-        Some(CustomDataValue::String(id)) => Ok(id.as_str()),
+        Some(CustomDataValue::String(id)) => id
+            .strip_prefix("profile:")
+            .context("Missing or unsupported identity group ID"),
         _ => bail!("Missing identity group ID"),
     }
 }
 
 fn mark_identity_group(group: &mut Group, id: &str) {
-    for (name, value) in [(MARKER, "identity_group"), (SCHEMA, "1"), (PROFILE_ID, id)] {
+    // keepass-rs infers any Base64-decodable custom-data text as Binary.
+    // Bare 32-character hexadecimal IDs therefore change type when reopened.
+    // An explicit non-Base64 prefix preserves the standard XML text value in
+    // this library and KeePassXC without adding another metadata copy.
+    for (name, value) in [
+        (MARKER, "identity_group".to_owned()),
+        (SCHEMA, "1".to_owned()),
+        (PROFILE_ID, format!("profile:{id}")),
+    ] {
         group.custom_data.insert(
             name.to_owned(),
             CustomDataItem {
-                value: Some(CustomDataValue::String(value.to_owned())),
+                value: Some(CustomDataValue::String(value)),
                 ..CustomDataItem::default()
             },
         );
@@ -969,6 +979,10 @@ mod tests {
                 .entries()
                 .find(|entry| entry.get(MARKER) == Some("identity"))
                 .unwrap();
+            assert!(
+                matches!(identity_group.custom_data[PROFILE_ID].value.as_ref(), Some(CustomDataValue::String(value)) if value == &format!("profile:{id}")),
+                "group IDs must remain text after KDBX serialization"
+            );
             assert_eq!(entry.get("Title"), Some("Identity details"));
             for field in ["UserName", "Email", "URL", "Notes"] {
                 assert!(entry.fields[field].is_protected());
