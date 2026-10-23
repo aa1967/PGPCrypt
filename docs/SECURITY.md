@@ -62,7 +62,18 @@ passwords cannot currently be exported through this single-password workflow;
 normalize their protection first. These checks govern explicit actions inside
 an already-unlocked trusted session; they do not isolate keys from that session.
 
-The Qt6 session UI and worker disable core dumps/process dumpability. The worker
+The terminal-style activity panel accepts a fixed event vocabulary. It remains
+in memory, is bounded, and clears at lock; it does not write a journal or record
+user contents, paths, identities, fingerprints, raw errors, credentials or
+advanced-protection events. Ordinary dummy-session status avoids a direct UI
+disclosure, but disabled actions, files, timings and forensic artifacts can
+still distinguish it. It remains read-only. See
+[the hidden-storage investigation](HIDDEN_STORAGE_RESEARCH.md).
+
+Notepad's separate window and its embedded layout share the same widgets,
+editor state and worker. The worker accepts one request at a time; moving the
+view does not introduce another vault writer. Extra session windows close on
+lock. The Qt6 session UI and worker disable core dumps/process dumpability. The worker
 owns stored/generated private keys. Pasted private-key imports necessarily pass
 through GUI buffers. Private pipes are bounded, requests/responses matched,
 and crypto runs outside the GUI event loop. Lock confirms worker termination,

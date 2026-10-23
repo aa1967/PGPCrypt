@@ -172,6 +172,25 @@ fn worker_vault_workflow_and_private_key_boundary() -> Result<()> {
     let verified = peer.ok("verify", json!({"text":signed["text"]}))?;
     assert_eq!(verified["text"], "worker signed message");
     assert_eq!(verified["signers"], json!([fp]));
+    assert_eq!(verified["signer_details"][0]["fingerprint"], fp);
+    let signed_text = signed["text"].as_str().unwrap();
+    let altered = signed_text.replace("worker signed message", "worker altered message");
+    // Every failed verification is an explicit negative result and must not
+    // return plaintext or identities retained from the preceding success.
+    for text in [altered.as_str(), "ordinary unsigned text", ""] {
+        let invalid = peer.raw("verify", json!({"text":text}))?;
+        assert_eq!(invalid["ok"], false);
+        assert_eq!(invalid["code"], "verification_failed");
+        assert!(invalid.get("data").is_none());
+        assert!(invalid.get("text").is_none());
+        assert!(invalid.get("signers").is_none());
+        assert!(invalid.get("signer_details").is_none());
+    }
+    let recovered = peer.ok("verify", json!({"text":signed["text"]}))?;
+    assert_eq!(
+        recovered, verified,
+        "failed verification cannot poison a later success"
+    );
     peer.ok("notes_set", json!({"text":"persisted protocol note"}))?;
     assert_eq!(peer.raw("private_export", json!({}))?["ok"], false);
     for operation in ["private_export", "protected_private_export"] {
@@ -467,6 +486,7 @@ fn preferences_subkeys_and_password_requests_roundtrip() -> Result<()> {
         assert_eq!(opened["preferences"]["lock_on_session_events"], false);
         assert_eq!(opened["preferences"]["clipboard_clear_seconds"], 0);
         assert_eq!(opened["preferences"]["qubes_rpc"], false);
+        assert_eq!(opened["preferences"]["notepad_popout"], true);
         for invalid in [
             json!({"theme":"unknown"}),
             json!({"clipboard_clear_seconds":4}),
@@ -477,7 +497,7 @@ fn preferences_subkeys_and_password_requests_roundtrip() -> Result<()> {
                 false
             );
         }
-        let preferences = json!({"auto_lock":true,"lock_on_focus_loss":false,"lock_on_session_events":true,"clipboard_clear_seconds":1800,"theme":"solarized","qubes_rpc":false});
+        let preferences = json!({"auto_lock":true,"lock_on_focus_loss":false,"lock_on_session_events":true,"clipboard_clear_seconds":1800,"theme":"solarized","qubes_rpc":false,"notepad_popout":false});
         for theme in ["warm-light", "nord", "solarized-light", "solarized-dark"] {
             peer.ok("settings_set", json!({"preferences":{"theme":theme}}))?;
         }
@@ -977,6 +997,18 @@ fn identity_metadata_and_document_properties_survive_moves_collisions_and_conver
             "profile_notes":"Private biography\nOnly inside the vault"
         }))?["id"].clone();
         let work = peer.ok("profile_save", json!({"profile_name":"Work"}))?["id"].clone();
+        let personal_id = personal.as_str().unwrap();
+        let work_id = work.as_str().unwrap();
+        let mut counts = json!({"":0});
+        counts[personal_id] = json!(0);
+        counts[work_id] = json!(0);
+        for operation in ["list", "documents_list"] {
+            assert_eq!(
+                peer.ok(operation, json!({}))?["profile_document_counts"],
+                counts,
+                "empty identities need visible zero counts"
+            );
+        }
         let profiles = peer.ok("profiles_list", json!({}))?["profiles"].clone();
         assert_eq!(profiles[0]["username"], "Private pseudonym");
         assert_eq!(profiles[0]["email"], "private@example.invalid");
@@ -1015,12 +1047,33 @@ fn identity_metadata_and_document_properties_survive_moves_collisions_and_conver
             work_document["title"], "UNTITLED",
             "equal titles are allowed in separate profiles"
         );
+        counts[personal_id] = json!(2);
+        counts[work_id] = json!(1);
+        for operation in ["list", "documents_list"] {
+            assert_eq!(
+                peer.ok(operation, json!({}))?["profile_document_counts"],
+                counts
+            );
+        }
+        assert_eq!(
+            peer.ok("documents_list", json!({"profile_id":personal}))?["profile_document_counts"],
+            counts,
+            "filtering documents must retain counts for the whole identity overview"
+        );
         let moved = peer.ok(
             "document_properties",
             json!({"document_id":second["id"],"profile_id":work,"title":"untitled"}),
         )?;
         assert_eq!(moved["title"], "untitled (1)");
         assert_eq!(moved["profile_id"], work);
+        counts[personal_id] = json!(1);
+        counts[work_id] = json!(2);
+        for operation in ["list", "documents_list"] {
+            assert_eq!(
+                peer.ok(operation, json!({}))?["profile_document_counts"],
+                counts
+            );
+        }
         let reopened = peer.ok("document_get", json!({"document_id":second["id"]}))?;
         assert_eq!(
             reopened["text"], "second private body",
@@ -1054,6 +1107,14 @@ fn identity_metadata_and_document_properties_survive_moves_collisions_and_conver
             json!({"title":"untitled","text":"unassigned body"}),
         )?;
         peer.ok("profile_delete", json!({"profile_id":work}))?;
+        counts.as_object_mut().unwrap().remove(work_id);
+        counts[""] = json!(3);
+        for operation in ["list", "documents_list"] {
+            assert_eq!(
+                peer.ok(operation, json!({}))?["profile_document_counts"],
+                counts
+            );
+        }
         let documents = peer.ok("documents_list", json!({}))?["documents"].clone();
         let mut titles = std::collections::HashSet::new();
         for document in documents.as_array().unwrap() {
@@ -1073,12 +1134,31 @@ fn identity_metadata_and_document_properties_survive_moves_collisions_and_conver
         let mut peer = Peer::new()?;
         peer.ok("open", json!({"path":portable,"password":password}))?;
         assert_eq!(
+            peer.ok("list", json!({}))?["profile_document_counts"],
+            counts
+        );
+        assert_eq!(
             peer.ok("profiles_list", json!({}))?["profiles"][0],
             profiles[0]
         );
+        // Physical identity groups may change traversal order. Stable IDs and
+        // every document property must survive conversion independently of it.
+        let by_id = |items: &Value| {
+            items
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|document| {
+                    (
+                        document["id"].as_str().unwrap().to_owned(),
+                        document.clone(),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
         assert_eq!(
-            peer.ok("documents_list", json!({}))?["documents"],
-            documents
+            by_id(&peer.ok("documents_list", json!({}))?["documents"]),
+            by_id(&documents)
         );
         assert_eq!(
             peer.ok("document_get", json!({"document_id":first["id"]}))?["text"],

@@ -87,6 +87,17 @@ impl std::fmt::Display for VaultAuthRequired {
 }
 impl std::error::Error for VaultAuthRequired {}
 
+/// Verification failure deliberately carries no user-controlled parser text
+/// or candidate identities. A failed operation must not imply a trusted match.
+#[derive(Debug)]
+struct VerificationFailed;
+impl std::fmt::Display for VerificationFailed {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        output.write_str("Signature verification failed: the message is invalid, changed, unsupported, or no matching key is available in this profile")
+    }
+}
+impl std::error::Error for VerificationFailed {}
+
 #[derive(Default)]
 pub struct Session {
     vault: Option<Vault>,
@@ -139,6 +150,21 @@ impl Session {
             vault.data = old;
         }
         result
+    }
+
+    fn profile_document_counts(data: &VaultData) -> Value {
+        let mut counts = serde_json::Map::new();
+        counts.insert(String::new(), json!(0u64));
+        for profile in &data.profiles {
+            counts.insert(profile.id.clone(), json!(0u64));
+        }
+        for document in &data.documents {
+            let count = counts
+                .entry(document.profile_id.clone())
+                .or_insert(json!(0u64));
+            *count = json!(count.as_u64().unwrap_or(0) + 1);
+        }
+        Value::Object(counts)
     }
 
     fn add_profile_member(data: &mut VaultData, id: &str, fingerprint: &str) -> Result<()> {
@@ -348,7 +374,7 @@ impl Session {
                         "can_sign":status == "Valid" && cert.keys().secret().with_policy(&policy,None).supported().alive().revoked(false).for_signing().next().is_some()})
                 }).collect();
                 Ok(
-                    json!({"keys":keys,"profiles":vault.data.profiles,"default_signing_key":self.vault()?.data.default_signing_key}),
+                    json!({"keys":keys,"profiles":vault.data.profiles,"profile_document_counts":Self::profile_document_counts(&vault.data),"default_signing_key":self.vault()?.data.default_signing_key}),
                 )
             }
             "profiles_list" => Ok(json!({"profiles":self.vault()?.data.profiles})),
@@ -408,7 +434,9 @@ impl Session {
                     "Profile no longer exists"
                 );
                 let documents=data.documents.iter().filter(|document|request.profile_id.is_empty() || document.profile_id==request.profile_id).map(|document|json!({"id":document.id,"title":document.title,"profile_id":document.profile_id,"created_at":document.created_at,"updated_at":document.updated_at})).collect::<Vec<_>>();
-                Ok(json!({"documents":documents}))
+                Ok(
+                    json!({"documents":documents,"profile_document_counts":Self::profile_document_counts(data)}),
+                )
             }
             "document_get" => {
                 let document = self
@@ -703,7 +731,7 @@ impl Session {
                 let opened = if request.op == "decrypt" {
                     pgp::decrypt(&request.text, certs.clone(), &request.password)?
                 } else {
-                    pgp::verify(&request.text, certs.clone())?
+                    pgp::verify(&request.text, certs.clone()).map_err(|_| VerificationFailed)?
                 };
                 let policy = StandardPolicy::new();
                 let signer_details=opened.signers.iter().map(|fingerprint| {
@@ -776,6 +804,8 @@ pub fn run(mut input: impl BufRead, mut output: impl Write) -> Result<()> {
                     .any(|cause| cause.is::<pgp::PasswordRequired>())
                 {
                     "password_required"
+                } else if error.chain().any(|cause| cause.is::<VerificationFailed>()) {
+                    "verification_failed"
                 } else if error.chain().any(|cause| cause.is::<VaultAuthRequired>()) {
                     "vault_auth_required"
                 } else {

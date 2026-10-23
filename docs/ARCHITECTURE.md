@@ -143,3 +143,19 @@ vault-password confirmation when any packet is unprotected. It serializes the
 original certificate rather than emitting the temporary decrypted copies used
 for authentication. New-password validation is shared by backends; legacy unlock
 is kept compatible.
+
+## Alpha11 workspace windows and KDBX groups
+
+Age schema 7 adds the default-true Notepad popout preference. A single Notepad
+widget and single worker session serve embedded and separate-window layouts;
+profile controls mirror the same selection. Additional session windows belong
+to the main process and are closed during lock. Activity is a bounded in-memory
+whitelist of fixed event messages, with no raw errors or secret-dependent
+advanced-option events. Verification failure has a dedicated generic IPC code
+and no successful-result payload.
+
+KDBX settings schema 6 maps profiles to actual marked groups. Identity details,
+documents and key references live under those groups; canonical armored keys
+remain single entries in the PGPCrypt group. Stable IDs support migration and
+external group edits while avoiding duplicate secret material for overlapping
+profiles. Older supported layouts migrate during save. See KDBX_COMPATIBILITY.md.

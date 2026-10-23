@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail, ensure};
 use keepass::{
     Database, DatabaseKey,
     config::{CompressionConfig, DatabaseVersion, KdfConfig},
-    db::{Entry, GroupId},
+    db::{CustomDataItem, CustomDataValue, Entry, Group, GroupId},
 };
 use quick_xml::{Reader, events::Event};
 use std::{
@@ -22,6 +22,7 @@ pub const MAGIC: &[u8] = &[0x03, 0xd9, 0xa2, 0x9a, 0x67, 0xfb, 0x4b, 0xb5];
 const MARKER: &str = "PGPCrypt.Type";
 const SCHEMA: &str = "PGPCrypt.Schema";
 const GROUP: &str = "PGPCrypt";
+const PROFILE_ID: &str = "PGPCrypt.ProfileId";
 
 fn number(bytes: &[u8]) -> Result<u64> {
     match bytes.len() {
@@ -243,54 +244,126 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
         .groups()
         .find(|g| g.name == GROUP)
         .context("No PGPCrypt group in this KDBX; use KeePassXC to copy keys manually")?;
+    let settings_ids = group
+        .entries()
+        .filter(|entry| entry.get(MARKER) == Some("settings"))
+        .map(|entry| entry.id())
+        .collect::<Vec<_>>();
+    ensure!(
+        settings_ids.len() == 1,
+        "Missing or duplicate PGPCrypt settings"
+    );
+    let settings = db
+        .entry(settings_ids[0])
+        .context("Missing settings entry")?;
+    let schema = settings
+        .get(SCHEMA)
+        .context("Missing settings schema")?
+        .parse::<u32>()?;
+    ensure!(
+        (1..=6).contains(&schema),
+        "Unsupported PGPCrypt KDBX settings schema"
+    );
     let mut data = VaultData::default();
-    let mut settings = false;
-    let mut fingerprints = HashSet::new();
-    let mut identities = HashMap::new();
-    let mut identity_entries_required = false;
-    for entry in group.entries() {
+    data.default_signing_key = settings
+        .get("PGPCrypt.DefaultSigningKey")
+        .unwrap_or_default()
+        .to_owned();
+    data.preferences = settings
+        .get("PGPCrypt.Preferences")
+        .map(serde_json::from_str)
+        .transpose()?
+        .unwrap_or_default();
+    data.preferences.validate()?;
+    data.profiles = settings
+        .get("PGPCrypt.Profiles")
+        .map(serde_json::from_str)
+        .transpose()?
+        .unwrap_or_default();
+    data.notes = settings.get("Notes").unwrap_or_default().to_owned();
+    data.idle_timeout_seconds = settings
+        .get("PGPCrypt.IdleTimeoutSeconds")
+        .context("Missing timeout")?
+        .parse()?;
+
+    let mut routes = group
+        .entries()
+        .map(|entry| (entry.id(), None))
+        .collect::<Vec<_>>();
+    let mut group_names = HashMap::new();
+    if schema == 6 {
+        for child in group.groups() {
+            let id = identity_group_id(&child)?.to_owned();
+            ensure!(
+                data.profiles.iter().any(|profile| profile.id == id),
+                "Identity group refers to a missing profile"
+            );
+            ensure!(
+                group_names.insert(id.clone(), child.name.clone()).is_none(),
+                "Duplicate identity group"
+            );
+            ensure!(
+                child.groups().next().is_none(),
+                "Nested identity groups are not supported"
+            );
+            routes.extend(child.entries().map(|entry| (entry.id(), Some(id.clone()))));
+        }
         ensure!(
-            entry.get(SCHEMA) == Some("1")
-                || (entry.get(MARKER) == Some("settings")
-                    && matches!(entry.get(SCHEMA), Some("2" | "3" | "4" | "5"))),
+            group_names.len() == data.profiles.len(),
+            "Missing identity groups"
+        );
+    } else {
+        ensure!(
+            group.groups().next().is_none(),
+            "Identity groups require KDBX settings schema 6; move unrelated groups outside PGPCrypt"
+        );
+    }
+    let mut fingerprints = HashSet::new();
+    let mut key_entry_ids = HashMap::new();
+    let mut reference_targets = Vec::new();
+    let mut identities = HashMap::new();
+    let mut memberships: HashMap<String, Vec<String>> = data
+        .profiles
+        .iter()
+        .map(|profile| (profile.id.clone(), Vec::new()))
+        .collect();
+    for (entry_id, location) in routes {
+        let entry = db.entry(entry_id).context("Missing managed entry")?;
+        if entry.get(MARKER) == Some("settings") {
+            ensure!(
+                location.is_none() && entry_id == settings_ids[0],
+                "Unexpected settings entry"
+            );
+            continue;
+        }
+        ensure!(
+            entry.get(SCHEMA) == Some("1"),
             "Unsupported PGPCrypt KDBX entry schema"
         );
         match entry.get(MARKER) {
-            Some("settings") => {
-                ensure!(!settings, "Duplicate PGPCrypt settings");
-                settings = true;
-                identity_entries_required = entry.get(SCHEMA) == Some("5");
-                data.default_signing_key = entry
-                    .get("PGPCrypt.DefaultSigningKey")
-                    .unwrap_or_default()
-                    .to_owned();
-                data.preferences = entry
-                    .get("PGPCrypt.Preferences")
-                    .map(serde_json::from_str)
-                    .transpose()?
-                    .unwrap_or_default();
-                data.preferences.validate()?;
-                data.profiles = entry
-                    .get("PGPCrypt.Profiles")
-                    .map(serde_json::from_str)
-                    .transpose()?
-                    .unwrap_or_default();
-                data.notes = entry.get("Notes").unwrap_or_default().to_owned();
-                data.idle_timeout_seconds = entry
-                    .get("PGPCrypt.IdleTimeoutSeconds")
-                    .context("Missing timeout")?
-                    .parse()?;
-            }
             Some("identity") => {
+                let id = entry
+                    .get(PROFILE_ID)
+                    .context("Missing identity ID")?
+                    .to_owned();
+                ensure!(
+                    (schema == 6 && location.as_deref() == Some(id.as_str()))
+                        || (schema == 5 && location.is_none()),
+                    "Identity entry is outside its group"
+                );
                 let identity = Profile {
-                    id: entry
-                        .get("PGPCrypt.ProfileId")
-                        .context("Missing identity ID")?
-                        .to_owned(),
-                    name: entry
-                        .get("Title")
-                        .context("Missing identity title")?
-                        .to_owned(),
+                    id: id.clone(),
+                    name: if schema == 6 {
+                        group_names
+                            .get(&id)
+                            .context("Missing identity group")?
+                            .clone()
+                    } else {
+                        entry
+                            .get("Title")
+                            .context("Missing identity title")?
+                            .to_owned()
+                    },
                     username: entry.get("UserName").unwrap_or_default().to_owned(),
                     email: entry.get("Email").unwrap_or_default().to_owned(),
                     url: entry.get("URL").unwrap_or_default().to_owned(),
@@ -298,9 +371,44 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
                     fingerprints: Vec::new(),
                 };
                 ensure!(
-                    identities.insert(identity.id.clone(), identity).is_none(),
+                    identities.insert(id, identity).is_none(),
                     "Duplicate identity entry"
                 );
+            }
+            Some("key_reference") => {
+                ensure!(schema == 6, "Key references require KDBX settings schema 6");
+                let id = location
+                    .as_ref()
+                    .context("Key reference is outside an identity group")?;
+                ensure!(
+                    [
+                        "OpenPGP.PublicKey",
+                        "OpenPGP.PrivateKey",
+                        "OpenPGP.Revocation"
+                    ]
+                    .iter()
+                    .all(|field| entry.get(field).is_none()),
+                    "Key references must not duplicate armored key material"
+                );
+                let fingerprint = entry
+                    .get("OpenPGP.Fingerprint")
+                    .context("Missing key reference fingerprint")?
+                    .to_owned();
+                let members = memberships
+                    .get_mut(id)
+                    .context("Key reference belongs to a missing profile")?;
+                ensure!(
+                    !members.contains(&fingerprint),
+                    "Duplicate key reference in an identity group"
+                );
+                reference_targets.push((
+                    fingerprint.clone(),
+                    entry
+                        .get("PGPCrypt.KeyEntry")
+                        .context("Missing canonical key reference")?
+                        .to_owned(),
+                ));
+                members.push(fingerprint);
             }
             Some("document") => {
                 data.documents.push(Document {
@@ -316,10 +424,13 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
                         .get("Notes")
                         .context("Missing saved document text")?
                         .to_owned(),
-                    profile_id: entry
-                        .get("PGPCrypt.ProfileId")
-                        .unwrap_or_default()
-                        .to_owned(),
+                    // In schema 6, moving an entry in KeePassXC changes its
+                    // identity. Its old custom field may legitimately be stale.
+                    profile_id: if schema == 6 {
+                        location.clone().unwrap_or_default()
+                    } else {
+                        entry.get(PROFILE_ID).unwrap_or_default().to_owned()
+                    },
                     created_at: entry
                         .get("PGPCrypt.CreatedAt")
                         .context("Missing document creation time")?
@@ -331,10 +442,16 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
                 });
             }
             Some("key") => {
-                let public = entry
-                    .get("OpenPGP.PublicKey")
-                    .context("Missing public key")?;
-                let public = pgp::parse(public.as_bytes())?;
+                ensure!(
+                    location.is_none(),
+                    "Canonical keys must remain in the PGPCrypt root group"
+                );
+                let public = pgp::parse(
+                    entry
+                        .get("OpenPGP.PublicKey")
+                        .context("Missing public key")?
+                        .as_bytes(),
+                )?;
                 ensure!(
                     !public.is_tsk(),
                     "KDBX public-key field contains private material"
@@ -360,6 +477,7 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
                         && fingerprints.insert(fingerprint.clone()),
                     "Duplicate or mismatched KDBX key fingerprint"
                 );
+                key_entry_ids.insert(fingerprint.clone(), entry_id.uuid().to_string());
                 data.certificates.push(pgp::encode(&cert)?.to_vec());
                 if let Some(armor) = entry.get("OpenPGP.Revocation").filter(|s| !s.is_empty()) {
                     data.revocations.push(RevocationTicket {
@@ -373,13 +491,17 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
             ),
         }
     }
+    for (fingerprint, target) in reference_targets {
+        ensure!(
+            key_entry_ids.get(&fingerprint) == Some(&target),
+            "Key reference does not match its canonical key"
+        );
+    }
     ensure!(
-        settings && (60..=3600).contains(&data.idle_timeout_seconds),
-        "Missing/invalid PGPCrypt settings"
+        (60..=3600).contains(&data.idle_timeout_seconds),
+        "Invalid PGPCrypt timeout"
     );
-    if identity_entries_required {
-        // The standard entry fields are authoritative so KeePassXC edits are
-        // portable. The protected settings record retains stable memberships.
+    if schema >= 5 {
         ensure!(
             identities.len() == data.profiles.len(),
             "Missing or unexpected identity entries"
@@ -393,15 +515,60 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
             profile.email = identity.email.clone();
             profile.url = identity.url.clone();
             profile.notes = identity.notes.clone();
+            if schema == 6 {
+                profile.fingerprints = memberships
+                    .remove(&profile.id)
+                    .context("Missing identity memberships")?;
+            }
         }
     } else {
         ensure!(
             identities.is_empty(),
-            "Identity entries require PGPCrypt settings schema 5"
+            "Identity entries require PGPCrypt settings schema 5 or 6"
         );
     }
     data.validate()?;
     Ok((data, db))
+}
+
+fn identity_group_id(group: &Group) -> Result<&str> {
+    let field = |name: &str| {
+        group
+            .custom_data
+            .get(name)
+            .and_then(|item| item.value.as_ref())
+    };
+    ensure!(
+        matches!(field(MARKER),Some(CustomDataValue::String(value)) if value=="identity_group")
+            && matches!(field(SCHEMA),Some(CustomDataValue::String(value)) if value=="1"),
+        "Unknown group inside PGPCrypt; move unrelated groups outside PGPCrypt"
+    );
+    match field(PROFILE_ID) {
+        Some(CustomDataValue::String(id)) => id
+            .strip_prefix("profile:")
+            .context("Missing or unsupported identity group ID"),
+        _ => bail!("Missing identity group ID"),
+    }
+}
+
+fn mark_identity_group(group: &mut Group, id: &str) {
+    // keepass-rs infers any Base64-decodable custom-data text as Binary.
+    // Bare 32-character hexadecimal IDs therefore change type when reopened.
+    // An explicit non-Base64 prefix preserves the standard XML text value in
+    // this library and KeePassXC without adding another metadata copy.
+    for (name, value) in [
+        (MARKER, "identity_group".to_owned()),
+        (SCHEMA, "1".to_owned()),
+        (PROFILE_ID, format!("profile:{id}")),
+    ] {
+        group.custom_data.insert(
+            name.to_owned(),
+            CustomDataItem {
+                value: Some(CustomDataValue::String(value)),
+                ..CustomDataItem::default()
+            },
+        );
+    }
 }
 
 fn group(db: &mut Database) -> GroupId {
@@ -496,120 +663,281 @@ pub fn write(
         };
     }
     let group_id = group(&mut db);
+    let mut group_ids = HashMap::new();
+    let mut locations = vec![(group_id, None)];
     {
-        let mut group = db.group_mut(group_id).context("Missing PGPCrypt group")?;
-        let settings_id = group
-            .as_ref()
-            .entries()
-            .find(|e| e.get(MARKER) == Some("settings"))
-            .map(|e| e.id());
-        {
-            let mut settings = if let Some(id) = settings_id {
-                group.entry_mut(id).context("Missing settings")?
-            } else {
-                group.add_entry()
-            };
-            settings.set_unprotected("Title", "Vault notes and settings");
-            settings.set_unprotected(MARKER, "settings");
-            settings.set_unprotected(SCHEMA, "5");
-            settings.set_protected("PGPCrypt.Profiles", serde_json::to_string(&data.profiles)?);
-            settings.set_protected(
-                "PGPCrypt.Preferences",
-                serde_json::to_string(&data.preferences)?,
+        let managed = db.group(group_id).context("Missing PGPCrypt group")?;
+        for child in managed.groups() {
+            let id = identity_group_id(&child)?.to_owned();
+            ensure!(
+                child.groups().next().is_none(),
+                "Nested identity groups are not supported"
             );
-            settings.set_protected("PGPCrypt.DefaultSigningKey", &data.default_signing_key);
-            settings.set_protected("Notes", &data.notes);
-            settings.set_unprotected(
-                "PGPCrypt.IdleTimeoutSeconds",
-                data.idle_timeout_seconds.to_string(),
+            ensure!(
+                group_ids.insert(id.clone(), child.id()).is_none(),
+                "Duplicate identity group"
             );
+            locations.push((child.id(), Some(id)));
         }
-        for bytes in &data.certificates {
-            let fp = pgp::parse(bytes)?.fingerprint().to_hex();
-            let existing = group
-                .as_ref()
-                .entries()
-                .find(|e| {
-                    e.get(MARKER) == Some("key")
-                        && e.get("OpenPGP.Fingerprint") == Some(fp.as_str())
-                })
-                .map(|e| e.id());
-            let mut entry = if let Some(id) = existing {
-                group.entry_mut(id).context("Missing key entry")?
-            } else {
-                group.add_entry()
-            };
-            set_key(&mut entry, bytes, data)?;
+    }
+    let mut keys = HashMap::new();
+    let mut identities = HashMap::new();
+    let mut documents = HashMap::new();
+    let mut references = HashMap::new();
+    let mut settings_id = None;
+    for (location, profile_id) in locations {
+        let source = db.group(location).context("Missing managed group")?;
+        for entry in source.entries() {
+            let id = entry.id();
+            match entry.get(MARKER) {
+                Some("settings") => {
+                    ensure!(
+                        profile_id.is_none() && settings_id.replace(id).is_none(),
+                        "Duplicate or misplaced settings entry"
+                    );
+                }
+                Some("key") => {
+                    ensure!(
+                        profile_id.is_none(),
+                        "Canonical key is outside the PGPCrypt root"
+                    );
+                    let fp = entry
+                        .get("OpenPGP.Fingerprint")
+                        .context("Missing key fingerprint")?
+                        .to_owned();
+                    ensure!(keys.insert(fp, id).is_none(), "Duplicate key entry");
+                }
+                Some("identity") => {
+                    let profile = entry
+                        .get(PROFILE_ID)
+                        .context("Missing identity ID")?
+                        .to_owned();
+                    ensure!(
+                        profile_id
+                            .as_deref()
+                            .is_none_or(|location| location == profile),
+                        "Misplaced identity entry"
+                    );
+                    ensure!(
+                        identities.insert(profile, id).is_none(),
+                        "Duplicate identity entry"
+                    );
+                }
+                Some("document") => {
+                    ensure!(
+                        documents
+                            .insert(
+                                entry
+                                    .get("PGPCrypt.DocumentId")
+                                    .context("Missing document ID")?
+                                    .to_owned(),
+                                id
+                            )
+                            .is_none(),
+                        "Duplicate document entry"
+                    );
+                }
+                Some("key_reference") => {
+                    let profile = profile_id
+                        .as_ref()
+                        .context("Key reference is outside an identity group")?
+                        .clone();
+                    let fp = entry
+                        .get("OpenPGP.Fingerprint")
+                        .context("Missing key reference fingerprint")?
+                        .to_owned();
+                    ensure!(
+                        references.insert((profile, fp), id).is_none(),
+                        "Duplicate key reference"
+                    );
+                }
+                _ => bail!(
+                    "Unknown entry in PGPCrypt group; move unrelated entries to another group in KeePassXC"
+                ),
+            }
         }
-        // The retained original may still contain deleted managed documents.
-        // Remove them from this snapshot rather than resurrecting them later.
-        let stale = group
-            .as_ref()
-            .entries()
-            .filter(|entry| {
-                (entry.get(MARKER) == Some("document")
-                    && !data
-                        .documents
-                        .iter()
-                        .any(|doc| entry.get("PGPCrypt.DocumentId") == Some(doc.id.as_str())))
-                    || (entry.get(MARKER) == Some("identity")
-                        && !data.profiles.iter().any(|profile| {
-                            entry.get("PGPCrypt.ProfileId") == Some(profile.id.as_str())
-                        }))
+    }
+    let fingerprints = data
+        .certificates
+        .iter()
+        .map(|bytes| pgp::parse(bytes).map(|cert| cert.fingerprint().to_hex()))
+        .collect::<Result<HashSet<_>>>()?;
+    let mut stale = Vec::new();
+    stale.extend(
+        keys.iter()
+            .filter(|(fp, _)| !fingerprints.contains(*fp))
+            .map(|(_, id)| *id),
+    );
+    stale.extend(
+        identities
+            .iter()
+            .filter(|(profile, _)| !data.profiles.iter().any(|p| p.id == **profile))
+            .map(|(_, id)| *id),
+    );
+    stale.extend(
+        documents
+            .iter()
+            .filter(|(document, _)| !data.documents.iter().any(|d| d.id == **document))
+            .map(|(_, id)| *id),
+    );
+    stale.extend(
+        references
+            .iter()
+            .filter(|((profile, fp), _)| {
+                !data
+                    .profiles
+                    .iter()
+                    .any(|p| p.id == *profile && p.fingerprints.contains(fp))
             })
-            .map(|entry| entry.id())
-            .collect::<Vec<_>>();
-        for id in stale {
-            group
-                .entry_mut(id)
-                .context("Missing document entry")?
-                .remove();
+            .map(|(_, id)| *id),
+    );
+    for id in stale {
+        db.entry_mut(id)
+            .context("Missing stale managed entry")?
+            .remove();
+    }
+    for profile in &data.profiles {
+        let id = if let Some(id) = group_ids.get(&profile.id) {
+            *id
+        } else {
+            let mut managed = db.group_mut(group_id).context("Missing PGPCrypt group")?;
+            let child = managed.add_group();
+            child.id()
+        };
+        let mut child = db.group_mut(id).context("Missing identity group")?;
+        child.name = profile.name.clone();
+        mark_identity_group(&mut child, &profile.id);
+        group_ids.insert(profile.id.clone(), id);
+    }
+    {
+        let id = if let Some(id) = settings_id {
+            id
+        } else {
+            db.group_mut(group_id)
+                .context("Missing PGPCrypt group")?
+                .add_entry()
+                .id()
+        };
+        let mut settings = db.entry_mut(id).context("Missing settings entry")?;
+        settings.set_unprotected("Title", "Vault notes and settings");
+        settings.set_unprotected(MARKER, "settings");
+        settings.set_unprotected(SCHEMA, "6");
+        settings.set_protected("PGPCrypt.Profiles", serde_json::to_string(&data.profiles)?);
+        settings.set_protected(
+            "PGPCrypt.Preferences",
+            serde_json::to_string(&data.preferences)?,
+        );
+        settings.set_protected("PGPCrypt.DefaultSigningKey", &data.default_signing_key);
+        settings.set_protected("Notes", &data.notes);
+        settings.set_unprotected(
+            "PGPCrypt.IdleTimeoutSeconds",
+            data.idle_timeout_seconds.to_string(),
+        );
+    }
+    for bytes in &data.certificates {
+        let fp = pgp::parse(bytes)?.fingerprint().to_hex();
+        let id = if let Some(id) = keys.get(&fp) {
+            *id
+        } else {
+            db.group_mut(group_id)
+                .context("Missing PGPCrypt group")?
+                .add_entry()
+                .id()
+        };
+        let mut entry = db.entry_mut(id).context("Missing key entry")?;
+        if entry.as_ref().parent().id() != group_id {
+            entry.move_to(group_id)?;
         }
-        for profile in &data.profiles {
-            let existing = group
-                .as_ref()
-                .entries()
-                .find(|entry| {
-                    entry.get(MARKER) == Some("identity")
-                        && entry.get("PGPCrypt.ProfileId") == Some(profile.id.as_str())
-                })
-                .map(|entry| entry.id());
-            let mut entry = if let Some(id) = existing {
-                group.entry_mut(id).context("Missing identity entry")?
-            } else {
-                group.add_entry()
-            };
-            entry.set_unprotected("Title", &profile.name);
-            entry.set_unprotected(MARKER, "identity");
-            entry.set_unprotected(SCHEMA, "1");
-            entry.set_unprotected("PGPCrypt.ProfileId", &profile.id);
-            entry.set_protected("UserName", &profile.username);
-            entry.set_protected("Email", &profile.email);
-            entry.set_protected("URL", &profile.url);
-            entry.set_protected("Notes", &profile.notes);
+        set_key(&mut entry, bytes, data)?;
+        keys.insert(fp, id);
+    }
+    for profile in &data.profiles {
+        let target = *group_ids
+            .get(&profile.id)
+            .context("Missing identity group")?;
+        let id = if let Some(id) = identities.get(&profile.id) {
+            *id
+        } else {
+            db.group_mut(target)
+                .context("Missing identity group")?
+                .add_entry()
+                .id()
+        };
+        let mut entry = db.entry_mut(id).context("Missing identity entry")?;
+        if entry.as_ref().parent().id() != target {
+            entry.move_to(target)?;
         }
-        for document in &data.documents {
-            let existing = group
-                .as_ref()
-                .entries()
-                .find(|entry| {
-                    entry.get(MARKER) == Some("document")
-                        && entry.get("PGPCrypt.DocumentId") == Some(document.id.as_str())
-                })
-                .map(|entry| entry.id());
-            let mut entry = if let Some(id) = existing {
-                group.entry_mut(id).context("Missing document entry")?
+        entry.set_unprotected("Title", "Identity details");
+        entry.set_unprotected(MARKER, "identity");
+        entry.set_unprotected(SCHEMA, "1");
+        entry.set_unprotected(PROFILE_ID, &profile.id);
+        entry.set_protected("UserName", &profile.username);
+        entry.set_protected("Email", &profile.email);
+        entry.set_protected("URL", &profile.url);
+        entry.set_protected("Notes", &profile.notes);
+    }
+    for document in &data.documents {
+        let target = if document.profile_id.is_empty() {
+            group_id
+        } else {
+            *group_ids
+                .get(&document.profile_id)
+                .context("Missing document identity group")?
+        };
+        let id = if let Some(id) = documents.get(&document.id) {
+            *id
+        } else {
+            db.group_mut(target)
+                .context("Missing document group")?
+                .add_entry()
+                .id()
+        };
+        let mut entry = db.entry_mut(id).context("Missing document entry")?;
+        if entry.as_ref().parent().id() != target {
+            entry.move_to(target)?;
+        }
+        entry.set_unprotected("Title", &document.title);
+        entry.set_unprotected(MARKER, "document");
+        entry.set_unprotected(SCHEMA, "1");
+        entry.set_protected("Notes", &document.text);
+        entry.set_unprotected("PGPCrypt.DocumentId", &document.id);
+        entry.set_unprotected(PROFILE_ID, &document.profile_id);
+        entry.set_unprotected("PGPCrypt.CreatedAt", document.created_at.to_string());
+        entry.set_unprotected("PGPCrypt.UpdatedAt", document.updated_at.to_string());
+    }
+    for profile in &data.profiles {
+        let target = *group_ids
+            .get(&profile.id)
+            .context("Missing identity group")?;
+        for fp in &profile.fingerprints {
+            let id = if let Some(id) = references.get(&(profile.id.clone(), fp.clone())) {
+                *id
             } else {
-                group.add_entry()
+                db.group_mut(target)
+                    .context("Missing identity group")?
+                    .add_entry()
+                    .id()
             };
-            entry.set_unprotected("Title", &document.title);
-            entry.set_unprotected(MARKER, "document");
+            let canonical = keys.get(fp).context("Key reference has no canonical key")?;
+            let mut entry = db.entry_mut(id).context("Missing key reference")?;
+            entry.set_unprotected("Title", format!("Key {fp}"));
+            entry.set_unprotected(MARKER, "key_reference");
             entry.set_unprotected(SCHEMA, "1");
-            entry.set_protected("Notes", &document.text);
-            entry.set_unprotected("PGPCrypt.DocumentId", &document.id);
-            entry.set_unprotected("PGPCrypt.ProfileId", &document.profile_id);
-            entry.set_unprotected("PGPCrypt.CreatedAt", document.created_at.to_string());
-            entry.set_unprotected("PGPCrypt.UpdatedAt", document.updated_at.to_string());
+            entry.set_unprotected("OpenPGP.Fingerprint", fp);
+            entry.set_unprotected("PGPCrypt.KeyEntry", canonical.uuid().to_string());
+            if entry.get("Notes").is_none() {
+                entry.set_unprotected("Notes","Identity membership reference; no key material is duplicated here. In the PGPCrypt root group, find the canonical key with this exact OpenPGP.Fingerprint. Reveal OpenPGP.PublicKey or OpenPGP.PrivateKey there to recover it. Private-key passwords, if set, are separate from the database password.");
+            }
+        }
+    }
+    for (profile, id) in group_ids {
+        if !data.profiles.iter().any(|p| p.id == profile) {
+            let stale = db.group_mut(id).context("Missing stale identity group")?;
+            ensure!(
+                stale.as_ref().entries().next().is_none(),
+                "Identity group still contains a live entry"
+            );
+            stale.remove();
         }
     }
     let mut encrypted = Vec::new();
@@ -643,20 +971,33 @@ mod tests {
         {
             let root = db.root();
             let group = root.groups().find(|group| group.name == GROUP).unwrap();
-            let entry = group
+            let identity_group = group
+                .groups()
+                .find(|group| group.name == "Personal")
+                .unwrap();
+            let entry = identity_group
                 .entries()
                 .find(|entry| entry.get(MARKER) == Some("identity"))
                 .unwrap();
-            assert_eq!(entry.get("Title"), Some("Personal"));
+            assert!(
+                matches!(identity_group.custom_data[PROFILE_ID].value.as_ref(), Some(CustomDataValue::String(value)) if value == &format!("profile:{id}")),
+                "group IDs must remain text after KDBX serialization"
+            );
+            assert_eq!(entry.get("Title"), Some("Identity details"));
             for field in ["UserName", "Email", "URL", "Notes"] {
                 assert!(entry.fields[field].is_protected());
             }
         }
         db.foreach_entry_mut(|mut entry| {
             if entry.get(MARKER) == Some("identity") {
-                entry.set_unprotected("Title", "Edited identity");
+                entry.set_unprotected("Title", "A local recovery label");
                 entry.set_protected("UserName", "Edited alias");
                 entry.set_protected("Notes", "Edited in another client");
+            }
+        });
+        db.foreach_group_mut(|mut group| {
+            if identity_group_id(&group).is_ok_and(|profile| profile == id) {
+                group.name = "Edited identity".into();
             }
         });
         let mut changed = Vec::new();
@@ -677,6 +1018,267 @@ mod tests {
             open(&damaged, PASS).is_err(),
             "identity membership cannot silently detach"
         );
+        Ok(())
+    }
+
+    fn grouped_fixture() -> Result<(VaultData, String, String, String, String)> {
+        let mut data = VaultData::default();
+        let cert = pgp::generate("Group fixture <groups@example.invalid>")?;
+        let fp = cert.fingerprint().to_hex();
+        data.certificates.push(pgp::encode(&cert)?.to_vec());
+        let personal = crate::vault::workspace_id()?;
+        let work = crate::vault::workspace_id()?;
+        for (id, name) in [(&personal, "Personal"), (&work, "Work")] {
+            data.profiles.push(Profile {
+                id: id.clone(),
+                name: name.into(),
+                username: "Alias".into(),
+                email: String::new(),
+                url: String::new(),
+                notes: "Private profile notes".into(),
+                fingerprints: vec![fp.clone()],
+            });
+        }
+        let document = data.save_document(
+            "",
+            "Saved message",
+            &personal,
+            Some("Saved document text"),
+            1000,
+        )?;
+        Ok((data, fp, personal, work, document.id.clone()))
+    }
+
+    #[test]
+    fn actual_groups_support_shared_keys_group_rename_and_manual_moves() -> Result<()> {
+        let (data, fp, personal, work, document_id) = grouped_fixture()?;
+        let mut bytes = Vec::new();
+        write(&data, None, PASS, &mut bytes)?;
+        let (_, mut db) = open(&bytes, PASS)?;
+        let (personal_group, work_group, canonical, reference, document) = {
+            let root = db.root();
+            let managed = root.groups().find(|g| g.name == GROUP).unwrap();
+            let personal_group = managed.groups().find(|g| g.name == "Personal").unwrap();
+            let work_group = managed.groups().find(|g| g.name == "Work").unwrap();
+            let canonical = managed
+                .entries()
+                .filter(|e| e.get(MARKER) == Some("key"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                canonical.len(),
+                1,
+                "one canonical secret-key entry across identities"
+            );
+            for group in [&personal_group, &work_group] {
+                let reference = group
+                    .entries()
+                    .find(|e| e.get(MARKER) == Some("key_reference"))
+                    .unwrap();
+                assert_eq!(reference.get("OpenPGP.Fingerprint"), Some(fp.as_str()));
+                assert_eq!(
+                    reference.get("PGPCrypt.KeyEntry"),
+                    Some(canonical[0].id().uuid().to_string().as_str())
+                );
+                assert!(reference.get("OpenPGP.PrivateKey").is_none());
+                assert!(reference.get("OpenPGP.PublicKey").is_none());
+            }
+            (
+                personal_group.id(),
+                work_group.id(),
+                canonical[0].id(),
+                personal_group
+                    .entries()
+                    .find(|e| e.get(MARKER) == Some("key_reference"))
+                    .unwrap()
+                    .id(),
+                personal_group
+                    .entries()
+                    .find(|e| e.get(MARKER) == Some("document"))
+                    .unwrap()
+                    .id(),
+            )
+        };
+        db.group_mut(personal_group).unwrap().name = "Renamed personal".into();
+        db.entry_mut(reference).unwrap().remove();
+        db.entry_mut(document).unwrap().move_to(work_group)?;
+        db.entry_mut(document)
+            .unwrap()
+            .set_protected("Independent.Field", "preserve metadata");
+        let mut external = Vec::new();
+        db.save(&mut external, DatabaseKey::new().with_password(PASS))?;
+        let (loaded, original) = open(&external, PASS)?;
+        let personal_profile = loaded.profiles.iter().find(|p| p.id == personal).unwrap();
+        assert_eq!(personal_profile.name, "Renamed personal");
+        assert!(personal_profile.fingerprints.is_empty());
+        assert_eq!(
+            loaded
+                .profiles
+                .iter()
+                .find(|p| p.id == work)
+                .unwrap()
+                .fingerprints,
+            vec![fp]
+        );
+        assert_eq!(
+            loaded
+                .documents
+                .iter()
+                .find(|d| d.id == document_id)
+                .unwrap()
+                .profile_id,
+            work
+        );
+        let mut saved = Vec::new();
+        write(&loaded, Some(&original), PASS, &mut saved)?;
+        let (_, reopened) = open(&saved, PASS)?;
+        assert!(reopened.entry(canonical).is_some());
+        assert_eq!(
+            reopened.entry(document).unwrap().get("Independent.Field"),
+            Some("preserve metadata")
+        );
+        assert_eq!(reopened.entry(document).unwrap().parent().id(), work_group);
+        Ok(())
+    }
+
+    #[test]
+    fn schema5_migration_preserves_entry_ids_custom_fields_and_history() -> Result<()> {
+        let (data, _, personal, _, document_id) = grouped_fixture()?;
+        let mut bytes = Vec::new();
+        write(&data, None, PASS, &mut bytes)?;
+        let (_, mut db) = open(&bytes, PASS)?;
+        let (managed_id, children, entries) = {
+            let root = db.root();
+            let managed = root.groups().find(|g| g.name == GROUP).unwrap();
+            let children = managed.groups().map(|g| g.id()).collect::<Vec<_>>();
+            let entries = managed
+                .groups()
+                .flat_map(|g| {
+                    g.entries()
+                        .map(|e| {
+                            (
+                                e.id(),
+                                e.get(MARKER).unwrap().to_owned(),
+                                e.get(PROFILE_ID).unwrap_or_default().to_owned(),
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            (managed.id(), children, entries)
+        };
+        let mut identity_id = None;
+        let mut saved_document = None;
+        for (id, kind, profile_id) in entries {
+            if kind == "key_reference" {
+                db.entry_mut(id).unwrap().remove();
+                continue;
+            }
+            let mut entry = db.entry_mut(id).unwrap();
+            entry.move_to(managed_id)?;
+            if kind == "identity" {
+                entry.set_unprotected(
+                    "Title",
+                    data.profiles
+                        .iter()
+                        .find(|p| p.id == profile_id)
+                        .unwrap()
+                        .name
+                        .clone(),
+                );
+                if profile_id == personal {
+                    identity_id = Some(id);
+                    entry.set_protected("Independent.Identity", "preserve profile custom field");
+                }
+            } else if kind == "document" {
+                saved_document = Some(id);
+                entry.set_protected("Independent.Document", "preserve document custom field");
+                let historical: Entry = (*entry).clone();
+                let mut history = keepass::db::History::default();
+                history.add_entry(historical);
+                entry.history = Some(history);
+            }
+        }
+        for id in children {
+            db.group_mut(id).unwrap().remove();
+        }
+        db.foreach_entry_mut(|mut entry| {
+            if entry.get(MARKER) == Some("settings") {
+                entry.set_unprotected(SCHEMA, "5");
+            }
+        });
+        let mut legacy = Vec::new();
+        db.save(&mut legacy, DatabaseKey::new().with_password(PASS))?;
+        let (loaded, original) = open(&legacy, PASS)?;
+        assert_eq!(loaded.profiles.len(), 2);
+        assert_eq!(loaded.documents[0].id, document_id);
+        let mut migrated = Vec::new();
+        write(&loaded, Some(&original), PASS, &mut migrated)?;
+        let (loaded, db) = open(&migrated, PASS)?;
+        assert_eq!(loaded.profiles.len(), 2);
+        assert_eq!(
+            db.entry(identity_id.unwrap())
+                .unwrap()
+                .get("Independent.Identity"),
+            Some("preserve profile custom field")
+        );
+        let document = db.entry(saved_document.unwrap()).unwrap();
+        assert_eq!(
+            document.get("Independent.Document"),
+            Some("preserve document custom field")
+        );
+        assert_eq!(document.history.as_ref().unwrap().get_entries().len(), 1);
+        assert_eq!(identity_group_id(&document.parent())?, personal);
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_identity_groups_and_forged_references_are_rejected() -> Result<()> {
+        let (data, _, _, _, _) = grouped_fixture()?;
+        let mut bytes = Vec::new();
+        write(&data, None, PASS, &mut bytes)?;
+        let (_, db) = open(&bytes, PASS)?;
+        for alteration in [
+            "unknown_group",
+            "nested_group",
+            "wrong_target",
+            "duplicate_secret",
+        ] {
+            let mut changed = db.clone();
+            let main = {
+                let root = changed.root();
+                root.groups().find(|g| g.name == GROUP).unwrap().id()
+            };
+            match alteration {
+                "unknown_group" => {
+                    changed.group_mut(main).unwrap().add_group().name = "Unrelated".into();
+                }
+                "nested_group" => {
+                    let child = {
+                        let root = changed.group(main).unwrap();
+                        root.groups().next().unwrap().id()
+                    };
+                    changed.group_mut(child).unwrap().add_group().name = "Nested".into();
+                }
+                _ => changed.foreach_entry_mut(|mut entry| {
+                    if entry.get(MARKER) == Some("key_reference") {
+                        if alteration == "wrong_target" {
+                            entry.set_unprotected("PGPCrypt.KeyEntry", "forged reference");
+                        } else {
+                            entry.set_protected(
+                                "OpenPGP.PrivateKey",
+                                "must not be duplicated in references",
+                            );
+                        }
+                    }
+                }),
+            }
+            let mut malformed = Vec::new();
+            changed.save(&mut malformed, DatabaseKey::new().with_password(PASS))?;
+            assert!(
+                open(&malformed, PASS).is_err(),
+                "unsupported structure: {alteration}"
+            );
+        }
         Ok(())
     }
 

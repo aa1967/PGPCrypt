@@ -234,6 +234,11 @@ fn dummy_password_is_an_empty_read_only_view_and_never_changes_the_real_vault() 
             empty.ok("open", json!({"path":path,"password":dummy}))?["read_only"],
             true
         );
+        assert_eq!(
+            empty.ok("status", json!({}))?,
+            json!({"unlocked":true}),
+            "ordinary status must not identify an alternative-password session"
+        );
         assert_eq!(empty.ok("list", json!({}))?["keys"], json!([]));
         assert_eq!(empty.ok("profiles_list", json!({}))?["profiles"], json!([]));
         assert_eq!(

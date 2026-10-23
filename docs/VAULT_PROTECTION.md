@@ -76,8 +76,12 @@ expiry record reveals timestamps. Keep long, independently chosen passwords.
 Missing, malformed, unsafe or mismatched records disarm the relevant behavior.
 PGPCrypt refreshes bindings after its own saves. External saves, including in
 KeePassXC, disarm records until the relevant options are reconfigured after a
-normal unlock. Conversion leaves these options off for the destination; it
-does not copy the records. New vault creation refuses a name with existing
+normal unlock. Conversion in **both directions between age v1 and KDBX 4.1** leaves these
+options off for the destination. Neither target format receives the source
+master/option record, dummy-password verifier, emergency-password verifier or
+inactivity policy. Those four adjacent PGPCrypt files are per-vault application
+state, not part of either standard encrypted container. Configure the new copy
+separately after unlocking it normally. New vault creation refuses a name with existing
 protection companions, preventing accidental reuse of stale configuration.
 
 Same-length random overwrite does **not** hide destruction. Format headers,
@@ -87,3 +91,12 @@ exports may retain copies. An I/O error or power loss can leave the original or
 a partly overwritten file. No physical-erasure, forensic-concealment or rollback
 guarantee is made. Test only on disposable vaults and choose your backup policy
 deliberately; recovery copies are also copies these features cannot erase.
+
+## Hidden-storage investigation
+
+Dummy sessions now use ordinary session status text. This does not hide the
+feature from forensic inspection or remove their backend write restrictions.
+Root-owned files, embedded public metadata and a writable decoy require different
+design decisions; no privileged helper or new storage wrapper was added. See
+[the researched design limits](HIDDEN_STORAGE_RESEARCH.md), including how
+VeraCrypt hidden volumes differ and why dummy sessions remain read-only.
