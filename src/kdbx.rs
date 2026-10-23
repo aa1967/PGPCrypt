@@ -261,7 +261,7 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
         .context("Missing settings schema")?
         .parse::<u32>()?;
     ensure!(
-        (1..=6).contains(&schema),
+        (1..=7).contains(&schema),
         "Unsupported PGPCrypt KDBX settings schema"
     );
     let mut data = VaultData::default();
@@ -291,7 +291,7 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
         .map(|entry| (entry.id(), None))
         .collect::<Vec<_>>();
     let mut group_names = HashMap::new();
-    if schema == 6 {
+    if schema >= 6 {
         for child in group.groups() {
             let id = identity_group_id(&child)?.to_owned();
             ensure!(
@@ -347,13 +347,13 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
                     .context("Missing identity ID")?
                     .to_owned();
                 ensure!(
-                    (schema == 6 && location.as_deref() == Some(id.as_str()))
+                    (schema >= 6 && location.as_deref() == Some(id.as_str()))
                         || (schema == 5 && location.is_none()),
                     "Identity entry is outside its group"
                 );
                 let identity = Profile {
                     id: id.clone(),
-                    name: if schema == 6 {
+                    name: if schema >= 6 {
                         group_names
                             .get(&id)
                             .context("Missing identity group")?
@@ -376,7 +376,7 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
                 );
             }
             Some("key_reference") => {
-                ensure!(schema == 6, "Key references require KDBX settings schema 6");
+                ensure!(schema >= 6, "Key references require KDBX settings schema 6");
                 let id = location
                     .as_ref()
                     .context("Key reference is outside an identity group")?;
@@ -426,7 +426,7 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
                         .to_owned(),
                     // In schema 6, moving an entry in KeePassXC changes its
                     // identity. Its old custom field may legitimately be stale.
-                    profile_id: if schema == 6 {
+                    profile_id: if schema >= 6 {
                         location.clone().unwrap_or_default()
                     } else {
                         entry.get(PROFILE_ID).unwrap_or_default().to_owned()
@@ -515,7 +515,7 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
             profile.email = identity.email.clone();
             profile.url = identity.url.clone();
             profile.notes = identity.notes.clone();
-            if schema == 6 {
+            if schema >= 6 {
                 profile.fingerprints = memberships
                     .remove(&profile.id)
                     .context("Missing identity memberships")?;
@@ -821,7 +821,7 @@ pub fn write(
         let mut settings = db.entry_mut(id).context("Missing settings entry")?;
         settings.set_unprotected("Title", "Vault notes and settings");
         settings.set_unprotected(MARKER, "settings");
-        settings.set_unprotected(SCHEMA, "6");
+        settings.set_unprotected(SCHEMA, "7");
         settings.set_protected("PGPCrypt.Profiles", serde_json::to_string(&data.profiles)?);
         settings.set_protected(
             "PGPCrypt.Preferences",

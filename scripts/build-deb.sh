@@ -4,7 +4,7 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
 ./scripts/build-desktop.sh --release
 ./scripts/dev.sh build --release --locked --features legacy-migration --bin pgpcrypt-migrate --bin pgpcrypt-qrexec -j 4
-package_version=${PGPCRYPT_PACKAGE_VERSION:-0.1.0~alpha11}
+package_version=${PGPCRYPT_PACKAGE_VERSION:-0.1.0~alpha13}
 dpkg --validate-version "$package_version"
 # GitHub release uploads normalize '~' to '.', so choose that filename before
 # computing checksums. Debian's internal Version retains prerelease ordering.
@@ -17,11 +17,7 @@ install -d "$stage/DEBIAN" "$stage/usr/bin" "$stage/usr/lib/pgpcrypt" \
     "$stage/usr/share/doc/pgpcrypt"
 install -m 755 target/release/pgpcrypt-worker target/release/pgpcrypt-desktop target/release/pgpcrypt-migrate target/release/pgpcrypt-qrexec "$stage/usr/lib/pgpcrypt/"
 strip --strip-unneeded "$stage/usr/lib/pgpcrypt/pgpcrypt-desktop"
-cat > "$stage/usr/bin/pgpcrypt" <<'EOF'
-#!/bin/sh
-exec /usr/lib/pgpcrypt/pgpcrypt-desktop "$@"
-EOF
-chmod 755 "$stage/usr/bin/pgpcrypt"
+install -m 755 packaging/pgpcrypt-launcher "$stage/usr/bin/pgpcrypt"
 ln -s ../lib/pgpcrypt/pgpcrypt-migrate "$stage/usr/bin/pgpcrypt-migrate"
 install -d "$stage/etc/qubes-rpc"
 install -m 755 packaging/qubes/pgpcrypt.Sign packaging/qubes/pgpcrypt.Decrypt packaging/qubes/pgpcrypt.Lock "$stage/etc/qubes-rpc/"

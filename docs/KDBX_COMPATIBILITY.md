@@ -55,7 +55,7 @@ packets inside the encrypted container; take care when copying those packets out
 
 The `Vault notes and settings` entry holds the protected `Notes` field and
 `PGPCrypt.IdleTimeoutSeconds`, plus protected `PGPCrypt.DefaultSigningKey`
-(empty means no default). The settings entry uses `PGPCrypt.Schema=6`; key
+(empty means no default). The settings entry uses `PGPCrypt.Schema=7`; key
 entries remain schema 1. Older settings are read with defaults for missing fields. Protected
 `PGPCrypt.Preferences` holds JSON for themes, locking, clipboard clearing and
 Qubes opt-in; all new automatic behaviors default off.
@@ -140,3 +140,8 @@ retain it. `data.certificates` contains arrays of standard OpenPGP bytes.
 References: [KDBX specification](https://keepass.info/help/kb/kdbx.html),
 [keepass-rs](https://github.com/sseemayer/keepass-rs),
 [crate 0.17.0](https://crates.io/crates/keepass/0.17.0).
+
+Settings schema 7 adds activity clearing, session counters and removable-media
+preferences. Missing Notepad layout preferences now default embedded; explicit
+values are retained. Settings schemas 1–6 remain readable and group handling
+from schema 6 is preserved. Encryption and key entry schemas are unchanged.

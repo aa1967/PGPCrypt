@@ -3,6 +3,7 @@ pub mod expiry;
 mod kdbx;
 #[cfg(feature = "legacy-migration")]
 pub mod legacy_vault;
+pub mod memory;
 pub mod password;
 pub mod pgp;
 pub mod protection;
@@ -38,5 +39,6 @@ pub fn harden_process() -> anyhow::Result<()> {
         unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } == 0,
         "Could not disable process dumping"
     );
+    memory::initialize();
     Ok(())
 }

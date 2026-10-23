@@ -486,19 +486,30 @@ fn preferences_subkeys_and_password_requests_roundtrip() -> Result<()> {
         assert_eq!(opened["preferences"]["lock_on_session_events"], false);
         assert_eq!(opened["preferences"]["clipboard_clear_seconds"], 0);
         assert_eq!(opened["preferences"]["qubes_rpc"], false);
-        assert_eq!(opened["preferences"]["notepad_popout"], true);
+        assert_eq!(opened["preferences"]["notepad_popout"], false);
         for invalid in [
             json!({"theme":"unknown"}),
             json!({"clipboard_clear_seconds":4}),
             json!({"clipboard_clear_seconds":1801}),
+            json!({"activity_clear_seconds":4}),
+            json!({"activity_clear_seconds":3601}),
         ] {
             assert_eq!(
                 peer.raw("settings_set", json!({"preferences":invalid}))?["ok"],
                 false
             );
         }
-        let preferences = json!({"auto_lock":true,"lock_on_focus_loss":false,"lock_on_session_events":true,"clipboard_clear_seconds":1800,"theme":"solarized","qubes_rpc":false,"notepad_popout":false});
-        for theme in ["warm-light", "nord", "solarized-light", "solarized-dark"] {
+        let preferences = json!({"auto_lock":true,"lock_on_focus_loss":false,"lock_on_session_events":true,"clipboard_clear_seconds":1800,"theme":"solarized","qubes_rpc":false,"notepad_popout":false,"activity_clear_seconds":300,"show_session_stats":true,"allow_removable_media":true});
+        for theme in [
+            "warm-light",
+            "nord",
+            "solarized-light",
+            "solarized-dark",
+            "ruby-dark",
+            "ruby-light",
+            "terminal-green",
+            "cyberpunk",
+        ] {
             peer.ok("settings_set", json!({"preferences":{"theme":theme}}))?;
         }
         peer.ok(

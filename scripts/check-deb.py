@@ -9,6 +9,7 @@ import tempfile
 import io
 import pwd
 import json
+import shlex
 
 
 def checked(command, **kwargs):
@@ -54,7 +55,18 @@ def main():
             assert "not found" not in checked(["ldd", str(executable)]), name
         subprocess.run(["desktop-file-validate", str(stage / "usr/share/applications/pgpcrypt.desktop")], check=True)
         assert (stage / "usr/share/icons/hicolor/scalable/apps/pgpcrypt.svg").is_file()
-        assert "/usr/lib/pgpcrypt/pgpcrypt-desktop" in (stage / "usr/bin/pgpcrypt").read_text()
+        launcher = (stage / "usr/bin/pgpcrypt").read_text()
+        assert "/usr/lib/pgpcrypt/pgpcrypt-desktop" in launcher
+        assert "bwrap" not in launcher and "--unshare" not in launcher
+        # Exercise the packaged entry point without installing it in /usr.
+        # Only relocate its absolute desktop path into this unpacked fixture.
+        relocated_launcher = stage / "launcher-check"
+        relocated_launcher.write_text(launcher.replace("/usr/lib/pgpcrypt/pgpcrypt-desktop",
+                                                       shlex.quote(str(stage / "usr/lib/pgpcrypt/pgpcrypt-desktop"))))
+        relocated_launcher.chmod(0o755)
+        subprocess.run([str(relocated_launcher), "--smoke-ui"], env=settings,
+                       capture_output=True, text=True, timeout=15, check=True, **child_identity)
+        print("Packaged launcher starts directly without a namespace helper.")
         assert (stage / "usr/share/doc/pgpcrypt/source.tar.gz").is_file()
         for service in ("Sign", "Decrypt", "Lock"):
             handler=stage / ("etc/qubes-rpc/pgpcrypt."+service)
@@ -62,6 +74,7 @@ def main():
         assert not (stage / "etc/qubes/policy.d").exists(), "Never install dom0 policy in a guest package"
         dependencies = checked(["dpkg-deb", "-f", str(archive), "Depends"])
         assert "rustc" not in dependencies and "cargo" not in dependencies and "rustup" not in dependencies
+        assert "bubblewrap" not in dependencies
         assert "libzxcvbn0" in dependencies
         assert "libssl3t64 (>= 3.5.7-1~deb13u3)" in dependencies
         assert (stage / "usr/share/doc/pgpcrypt/third-party-licenses/age-0.12.1").is_dir()

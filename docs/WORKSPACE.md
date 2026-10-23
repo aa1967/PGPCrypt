@@ -101,8 +101,8 @@ disabled; this is a separate PGPCrypt feature.
 
 ## Notepad windows and activity
 
-Notepad opens in a separate window by default. Disable **Pop out Notepad** in
-Vault settings to keep it embedded. Both layouts use the same editor, controls,
+Notepad stays embedded by default. Enable **Open Notepad in its own window** in
+Vault settings to detach it. Existing explicit preferences are preserved. Both layouts use the same editor, controls,
 profile selection and worker session. Moving between layouts does not copy
 unsaved text or create another file writer. Main-window key/profile edits
 refresh those same controls. Lock closes session windows and discards unsaved
@@ -121,3 +121,17 @@ Verification also opens a PASS/FAIL result with aligned verified-signer and
 stored-certificate fields; matching a stored key does not establish its owner's
 real-world identity. Failed verification returns no authenticated message text
 or trusted signer metadata and clears the previous result.
+
+## Alpha12 workspace
+
+Saved notes is a separate navigation page with search, properties, profile moves,
+delete and open actions. The editor keeps the eight most recently modified
+notes for its selected profile; Load and Save remain available there. All
+appearance/security preferences are inline on the scrollable Vault settings
+page. Ruby light/dark, Hacker green and Cyberpunk themes are available.
+
+Starting with alpha13, the launcher runs directly without a sandbox. Recent
+paths persist on this device unless disabled, and desktop lock/suspend hooks
+can receive the session’s signals. See [SANDBOX.md](SANDBOX.md) for retained
+protections and deferred isolation options. Activity can clear periodically to Ready;
+optional launch-only counters do not provide durable login history.
