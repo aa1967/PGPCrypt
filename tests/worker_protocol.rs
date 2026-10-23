@@ -1141,9 +1141,24 @@ fn identity_metadata_and_document_properties_survive_moves_collisions_and_conver
             peer.ok("profiles_list", json!({}))?["profiles"][0],
             profiles[0]
         );
+        // Physical identity groups may change traversal order. Stable IDs and
+        // every document property must survive conversion independently of it.
+        let by_id = |items: &Value| {
+            items
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|document| {
+                    (
+                        document["id"].as_str().unwrap().to_owned(),
+                        document.clone(),
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
         assert_eq!(
-            peer.ok("documents_list", json!({}))?["documents"],
-            documents
+            by_id(&peer.ok("documents_list", json!({}))?["documents"]),
+            by_id(&documents)
         );
         assert_eq!(
             peer.ok("document_get", json!({"document_id":first["id"]}))?["text"],
