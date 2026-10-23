@@ -3,7 +3,7 @@
 //! performs all encryption, key derivation and authentication.
 use crate::{
     pgp,
-    vault::{MAX_SIZE, RevocationTicket, VaultData},
+    vault::{Document, MAX_SIZE, RevocationTicket, VaultData},
 };
 use anyhow::{Context, Result, bail, ensure};
 use keepass::{
@@ -250,7 +250,7 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
         ensure!(
             entry.get(SCHEMA) == Some("1")
                 || (entry.get(MARKER) == Some("settings")
-                    && matches!(entry.get(SCHEMA), Some("2" | "3"))),
+                    && matches!(entry.get(SCHEMA), Some("2" | "3" | "4"))),
             "Unsupported PGPCrypt KDBX entry schema"
         );
         match entry.get(MARKER) {
@@ -267,11 +267,44 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
                     .transpose()?
                     .unwrap_or_default();
                 data.preferences.validate()?;
+                data.profiles = entry
+                    .get("PGPCrypt.Profiles")
+                    .map(serde_json::from_str)
+                    .transpose()?
+                    .unwrap_or_default();
                 data.notes = entry.get("Notes").unwrap_or_default().to_owned();
                 data.idle_timeout_seconds = entry
                     .get("PGPCrypt.IdleTimeoutSeconds")
                     .context("Missing timeout")?
                     .parse()?;
+            }
+            Some("document") => {
+                data.documents.push(Document {
+                    id: entry
+                        .get("PGPCrypt.DocumentId")
+                        .context("Missing document ID")?
+                        .to_owned(),
+                    title: entry
+                        .get("Title")
+                        .context("Missing document title")?
+                        .to_owned(),
+                    text: entry
+                        .get("Notes")
+                        .context("Missing saved document text")?
+                        .to_owned(),
+                    profile_id: entry
+                        .get("PGPCrypt.ProfileId")
+                        .unwrap_or_default()
+                        .to_owned(),
+                    created_at: entry
+                        .get("PGPCrypt.CreatedAt")
+                        .context("Missing document creation time")?
+                        .parse()?,
+                    updated_at: entry
+                        .get("PGPCrypt.UpdatedAt")
+                        .context("Missing document update time")?
+                        .parse()?,
+                });
             }
             Some("key") => {
                 let public = entry
@@ -320,6 +353,7 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
         settings && (60..=3600).contains(&data.idle_timeout_seconds),
         "Missing/invalid PGPCrypt settings"
     );
+    data.validate()?;
     Ok((data, db))
 }
 
@@ -382,6 +416,7 @@ pub fn write(
     password: &str,
     writer: &mut dyn Write,
 ) -> Result<()> {
+    data.validate()?;
     for ticket in &data.revocations {
         ensure!(
             data.certificates.iter().any(|bytes| pgp::parse(bytes)
@@ -416,7 +451,8 @@ pub fn write(
             };
             settings.set_unprotected("Title", "Vault notes and settings");
             settings.set_unprotected(MARKER, "settings");
-            settings.set_unprotected(SCHEMA, "3");
+            settings.set_unprotected(SCHEMA, "4");
+            settings.set_protected("PGPCrypt.Profiles", serde_json::to_string(&data.profiles)?);
             settings.set_protected(
                 "PGPCrypt.Preferences",
                 serde_json::to_string(&data.preferences)?,
@@ -444,6 +480,49 @@ pub fn write(
                 group.add_entry()
             };
             set_key(&mut entry, bytes, data)?;
+        }
+        // The retained original may still contain deleted managed documents.
+        // Remove them from this snapshot rather than resurrecting them later.
+        let stale = group
+            .as_ref()
+            .entries()
+            .filter(|entry| {
+                entry.get(MARKER) == Some("document")
+                    && !data
+                        .documents
+                        .iter()
+                        .any(|doc| entry.get("PGPCrypt.DocumentId") == Some(doc.id.as_str()))
+            })
+            .map(|entry| entry.id())
+            .collect::<Vec<_>>();
+        for id in stale {
+            group
+                .entry_mut(id)
+                .context("Missing document entry")?
+                .remove();
+        }
+        for document in &data.documents {
+            let existing = group
+                .as_ref()
+                .entries()
+                .find(|entry| {
+                    entry.get(MARKER) == Some("document")
+                        && entry.get("PGPCrypt.DocumentId") == Some(document.id.as_str())
+                })
+                .map(|entry| entry.id());
+            let mut entry = if let Some(id) = existing {
+                group.entry_mut(id).context("Missing document entry")?
+            } else {
+                group.add_entry()
+            };
+            entry.set_unprotected("Title", &document.title);
+            entry.set_unprotected(MARKER, "document");
+            entry.set_unprotected(SCHEMA, "1");
+            entry.set_protected("Notes", &document.text);
+            entry.set_unprotected("PGPCrypt.DocumentId", &document.id);
+            entry.set_unprotected("PGPCrypt.ProfileId", &document.profile_id);
+            entry.set_unprotected("PGPCrypt.CreatedAt", document.created_at.to_string());
+            entry.set_unprotected("PGPCrypt.UpdatedAt", document.updated_at.to_string());
         }
     }
     let mut encrypted = Vec::new();

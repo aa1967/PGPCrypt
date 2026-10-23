@@ -46,10 +46,18 @@ def main():
         private = peer.request("protected_private_export", fingerprint=fingerprint)["text"]
         public = peer.request("public_export", fingerprint=fingerprint)["text"]
         ticket = peer.request("revocation_export", fingerprint=fingerprint)["text"]
+        profile = peer.request("profile_save", profile_name="Personal",
+                               profile_fingerprints=[fingerprint])["id"]
+        document = peer.request("document_save", profile_id=profile, title="Saved message",
+                                text="message saved inside the vault")["id"]
         peer.request("notes_set", text="notes created by PGPCrypt")
         peer.request("settings_set", idle_timeout_seconds=120)
         peer.lock()
         key_entry = "PGPCrypt/KDBX interop fixture"
+        document_entry = "PGPCrypt/Saved message"
+        assert run("show", "-q", "-s", "-a", "Notes", str(path), document_entry).strip() == "message saved inside the vault"
+        assert profile in run("show", "-q", "-s", "-a", "PGPCrypt.Profiles", str(path),
+                              "PGPCrypt/Vault notes and settings")
         assert "Advanced" in run("show", "-q", "-a", "Notes", str(path), key_entry)
         for attribute, expected in [("OpenPGP.PublicKey", public),
                                     ("OpenPGP.PrivateKey", private),
@@ -57,6 +65,7 @@ def main():
             actual = run("show", "-q", "-s", "-a", attribute, str(path), key_entry)
             assert actual.strip() == expected.strip(), attribute
         run("edit", "-q", "--notes", "my portable key note", str(path), key_entry)
+        run("edit", "-q", "--notes", "message edited in KeePassXC", str(path), document_entry)
         run("edit", "-q", "--notes", "edited in KeePassXC", str(path),
             "PGPCrypt/Vault notes and settings")
         run("add", "-q", "--username", "unrelated fixture", str(path), "External entry")
@@ -64,6 +73,8 @@ def main():
         peer.request("open", path=str(path), password=PASS)
         assert peer.request("notes_get")["text"] == "edited in KeePassXC"
         assert peer.request("list")["keys"][0]["fingerprint"] == fingerprint
+        assert peer.request("document_get", document_id=document)["text"] == "message edited in KeePassXC"
+        assert peer.request("profiles_list")["profiles"][0]["fingerprints"] == [fingerprint]
         # KeePassXC does not honor PGPCrypt's advisory lock. A save made while
         # PGPCrypt holds a stale snapshot must survive its next write attempt.
         run("edit", "-q", "--notes", "external update while PGPCrypt is open", str(path),
@@ -94,8 +105,10 @@ def main():
         peer.request("open", path=str(age), password=PASS)
         assert peer.request("protected_private_export", fingerprint=fingerprint)["text"] == private
         assert peer.request("revocation_export", fingerprint=fingerprint)["text"] == ticket
+        assert peer.request("document_get", document_id=document)["text"] == "message edited in KeePassXC"
+        assert peer.request("document_get", document_id=document)["profile_id"] == profile
         peer.lock()
-    print("KDBX interoperability passed: protected keys/revocation, KeePassXC edits, stale-write refusal, unrelated entries, age conversion")
+    print("KDBX interoperability passed: protected keys/documents/profiles, KeePassXC edits, stale-write refusal, unrelated entries, age conversion")
 
 
 if __name__ == "__main__":

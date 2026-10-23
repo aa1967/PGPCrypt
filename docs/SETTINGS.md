@@ -1,6 +1,6 @@
 # Settings
 
-Unlock a vault, then use **Settings → Preferences**. Preferences stay inside its
+Unlock a vault, then select the **Settings** navigation button or **Settings → Preferences**. Per-vault preferences stay inside its
 age/KDBX encryption and are copied during conversion. They apply after unlock;
 the locked landing screen uses the default light theme.
 
@@ -16,6 +16,10 @@ the locked landing screen uses the default light theme.
   a later copy from another application is left alone. When enabled, manual
   lock also clears owned clipboard content because the UI process then exits.
   Clipboard managers, other qubes and operating-system history may retain copies.
+- **Remember recent vaults on this device**: on by default. Stores up to five
+  paths outside vault encryption for one-click access to the password screen.
+  Disabling clears the paths and stops recording them; no passwords are saved.
+  This preference is per-device, separate from encrypted per-vault settings.
 - **Theme**: Light, Warm light, Dark, Nord, Solarized light or Solarized dark,
   saved per vault and applied after unlock. The older Solarized setting keeps
   its dark appearance.
@@ -30,7 +34,10 @@ with a confirmed password and preserves the original. The Preferences dialog
 also links to conversion. Conversion and timeout controls no longer occupy the
 main workspace.
 
-Only Keys and Notepad remain as pages. The removed encrypted-notes page stored
+The four pages are Keys, Notepad, Identities and Settings. Profiles and saved
+Notepad documents are described in [WORKSPACE.md](WORKSPACE.md). The **Password and vault protection** section has a master control and warning
+before the individual emergency password, dummy password and inactivity-deletion
+options can be enabled. All start off. See [the exact behavior and limits](VAULT_PROTECTION.md). The removed encrypted-notes page stored
 its text under the vault password, not an OpenPGP recipient key. Existing notes
 are preserved during saves and conversion. To recover older notes, reveal the
 `Notes` field on the KDBX `Vault notes and settings` entry in KeePassXC, or recover

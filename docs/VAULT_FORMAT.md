@@ -1,4 +1,4 @@
-# Vault format: age v1 plus encrypted schema 4
+# Vault format: age v1 plus encrypted schema 5
 
 The outer container is the unmodified [age v1 format](https://age-encryption.org/v1),
 implemented by `age` 0.12.1. The app defines no crypto header, nonce format,
@@ -20,13 +20,15 @@ After complete authenticated decryption, the plaintext is UTF-8 JSON:
 ```json
 {
   "application": "PGPCrypt",
-  "schema": 4,
+  "schema": 5,
   "data": {
     "certificates": [],
     "notes": "",
     "revocations": [],
     "idle_timeout_seconds": 300,
     "default_signing_key": "",
+    "profiles": [],
+    "documents": [],
     "preferences": {
       "auto_lock": false,
       "lock_on_focus_loss": false,
@@ -48,10 +50,11 @@ does not apply it. `idle_timeout_seconds` ranges from 60 to 3600.
 Schema-1 vaults are read with empty revocations and a 300-second timeout.
 Schemas 1 and 2 default to no saved signing key. Schemas 1–3 default to all
 automatic locking, clipboard wiping and RPC options off. Every save writes
-schema 4 with encrypted preferences. `default_signing_key` is empty for no
+schema 5 with encrypted preferences, profiles and documents. Schemas 1–4
+default to empty profiles/documents. `default_signing_key` is empty for no
 default; inactivity duration remains 60–3600 seconds but has no effect until
 `preferences.auto_lock` is enabled. Clipboard delay is 0 (off) or 5–1800 seconds.
-Older PGPCrypt releases reject schema 4; preserve a backup before upgrading. Unknown fields and unsupported versions are rejected.
+Older PGPCrypt releases reject schema 5; preserve a backup before upgrading. Unknown fields and unsupported versions are rejected.
 The schema version is private, separate from the public age format version.
 
 The writer pads JSON with spaces to a 4096-byte boundary inside encryption.
@@ -59,13 +62,25 @@ Maximum decoded payload is 16 MiB; encrypted input is bounded at 17 MiB before
 parsing. No compression is used. Fully consume and authenticate the age stream
 before returning data; never return a partially verified vault.
 
+`profiles` contains `{id,name,fingerprints}` objects. IDs are random 128-bit
+lowercase hexadecimal identifiers; names are unique ignoring case, have 1–80
+characters without controls, and cannot be All. Membership references known
+certificate fingerprints without duplicates. There are at most 64 profiles.
+`documents` contains `{id,title,text,profile_id,created_at,updated_at}` objects.
+Titles have 1–120 characters without controls, text is at most 4 MiB, and the
+profile reference is empty or valid. Timestamps are Unix seconds. A vault has
+at most 1024 documents within its overall 16 MiB bound. All is an implicit view,
+not a stored profile. See [WORKSPACE.md](WORKSPACE.md).
+
 ## Persistence
 
 Create/sync a same-directory 0600 temporary ciphertext file, atomically persist,
 then sync the directory. Creation never overwrites an existing vault. Refuse
 symlink destinations. Hold a nonblocking flock in an adjacent empty `.lock` file
 throughout the unlocked session. This coordinates cooperating writers, not
-malicious directory owners. No plaintext sidecar or WAL is created.
+malicious directory owners. No plaintext document sidecar or WAL is created.
+The optional emergency destruction feature uses a separate public KDF verifier
+and ciphertext binding; see [EMERGENCY_PASSWORD.md](EMERGENCY_PASSWORD.md).
 
 ## Alpha1 conversion
 

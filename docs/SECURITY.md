@@ -14,10 +14,16 @@ Debian supplies native libraries. The normal worker has no libsodium dependency
 or legacy crypto codec. Debian libsodium is used only by the separate recovery
 binary to read alpha1 files.
 
-All public/private key bytes, identities, emails, fingerprints, notes and schema
+All public/private key bytes, identities, emails, fingerprints, profiles,
+saved documents, notes and schema
 metadata are inside encryption. There is no default GnuPG home/agent access,
-background networking, telemetry, plaintext autosave or external keyring index.
-Explicitly saving a decrypted Notepad result writes plaintext to the chosen file.
+background networking, telemetry, plaintext document autosave or external keyring
+index. The user-requested recent-vault feature stores paths outside encryption
+on this device by default; disable it in Settings to clear and stop recording
+them. Paths may reveal identifying names, even without any PGP key metadata.
+Notepad documents saved to the vault remain inside its encryption. Explicit
+Export writes an ordinary file outside the vault; readable output requires
+confirmation. Import loads text without automatically saving it.
 The complete vault stream authenticates before parsing; decrypted text is also
 buffered until its OpenPGP reader finishes successfully. Unknown/invalid
 signatures fail verification. Signature validity does not establish identity.
@@ -48,6 +54,25 @@ through GUI buffers. Private pipes are bounded, requests/responses matched,
 and crypto runs outside the GUI event loop. Lock confirms worker termination,
 then replaces the UI process. Parent-death signals prevent live orphan workers.
 The supervisor itself can outlive a desktop launcher that exits after launch.
+
+## Profiles and emergency destruction
+
+Profiles are encrypted organizational filters, not separate vaults or security
+principals. The worker applies profile membership to crypto requests, while the
+whole unlocked vault remains in trusted worker memory. Use separate vault files
+for independently encrypted identities. Verification displays only validated
+self-bound identities together with the full fingerprint.
+
+Optional protection has a separate public master flag, purpose-separated
+Argon2id password verifiers and an inactivity policy bound to ciphertext. Records
+reveal feature presence, allow offline guessing and may expose unlock/deadline
+timestamps; they contain no PGP keys or identities. Dummy sessions are empty and
+read-only, without decrypting the real vault. A local-clock expiry check can
+destroy an overdue copy before password authentication or decryption.
+The trigger is best-effort in-place overwrite at unchanged byte length. It does
+not guarantee physical erasure, plausible deniability, concealment of changes,
+or deletion of Qubes snapshots/backups. Read [the exact limits](VAULT_PROTECTION.md).
+Only disposable fixtures are used for destruction checks.
 
 ## Remaining boundaries
 

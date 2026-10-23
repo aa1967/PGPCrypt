@@ -31,7 +31,10 @@ It is not a sandbox against the UI while unlocked.
 
 - Plaintext uses QPlainTextEdit; undo/redo is disabled and HTML is not rendered.
 - Password entries use password mode and sensitive/no-prediction input hints.
-- No saved window state, recent-vault list, or plaintext autosave. The file
+- No saved window state or plaintext document autosave. The optional recent-vault
+  feature stores up to five paths outside encryption in private local state; it
+  is on by default and can be disabled/cleared in Settings. Passwords are never
+  saved. The file
   browser uses Qt widgets instead of native/portal dialogs. Per-user QSettings
   paths point at `/dev/null` (a non-directory), preventing QtProject.conf history
   and last-directory writes; this affects this process only.
