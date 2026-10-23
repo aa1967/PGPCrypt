@@ -1,5 +1,39 @@
 # Validation history
 
+## Alpha9 evidence
+
+Functional source `fcfb8b3` was pushed before tests. All 49 Rust checks passed:
+37 core, 3 protection protocol, 1 GnuPG interop and 8 worker/lifecycle checks.
+Coverage includes purpose-separated password records, master-off disarming,
+unsafe file/record rejection, same-length destruction, dummy views that never
+decrypt or change real contents, normal-unlock deadline reset and overdue
+pre-decryption destruction. Destruction used only fresh disposable fixtures.
+
+Profiles scoped default signers/recipients/verification; new/imported keys joined
+the selected profile. Both conversion directions preserved memberships and saved
+text. Deleting profiles retained keys/documents, and deleted KDBX documents did
+not resurrect on later saves. Valid 4 MiB escaped documents passed private IPC,
+save/get/reopen in both formats. Independent Debian age compatibility passed for
+schemas 1–5; KeePassXC 2.7.10 read/edited protected document content and profiles,
+retained keys/unrelated entries and passed stale-write refusal and age conversion.
+
+The packaged age/KDBX Qt workflows and lock/restart check passed. These covered
+four-page navigation, profile filters, internal document browsing, verification
+identity display, actual Copy/Paste, read-only control restrictions, isolated
+recent-history persistence/clearing and one-click access to the password form.
+The Notepad layout was visually reviewed offscreen. A follow-up theme palette
+refresh was pushed as `833b651` before checking the updated GUI. Packaging checked
+ELF dependencies/no RPATH, owners/modes, source/license files, Qubes handlers,
+OpenSSL security minimum and writable-path guidance without a system install.
+Rust formatting/Clippy and C++ warnings-as-errors compilation passed.
+
+Real Qubes transport/host hooks, native clipboard/compositor behavior, physical
+erasure, forensic concealment, adversarial power-loss/filesystem behavior and an
+independent audit remain unverified. Inactivity depends on local clock/companion
+records and is bypassable by other software; dummy views are read-only. See
+[VAULT_PROTECTION.md](VAULT_PROTECTION.md). KDBX writing remains experimental
+upstream. Alpha8's advisory comparison was not a new comprehensive alpha9 audit.
+
 ## Alpha8 evidence
 
 Functional source `2901826` and follow-up test expectations `afda4f9` / `74f7347`

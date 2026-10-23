@@ -52,3 +52,9 @@ Debian Version stays `0.1.0~alpha9` for correct prerelease ordering. Install usi
 the actual downloaded filename. The Release checksums workflow can regenerate
 SHA256SUMS from the `.deb` assets of an existing release without changing its
 binaries or tag. It also repairs the initial alpha3 upload's checksum filenames.
+
+README download links use the validated immutable `alpha9-packages` branch so
+an unfinished GitHub release job cannot produce a 404. Publish and verify that
+package branch before advertising an updated README. The normal tagged release
+remains an additional download source. Keep source changes on pgpcrypt-alpha9;
+do not merge the binary-only package branch.
