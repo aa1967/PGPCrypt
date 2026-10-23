@@ -14,11 +14,70 @@ const MAX_RECORD: usize = 1024;
 const SUFFIX: &str = ".pgpcrypt-protection";
 const COMPANIONS: [&str; 3] = [".pgpcrypt-emergency", ".pgpcrypt-dummy", ".pgpcrypt-expiry"];
 
+/// An option can be enabled without having a password or policy configured.
+/// These flags are UI permissions, not indicators that a secret has been set.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct Options {
+    pub emergency: bool,
+    pub dummy: bool,
+    pub expiry: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OptionKind {
+    Emergency,
+    Dummy,
+    Expiry,
+}
+
+impl OptionKind {
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::Emergency => COMPANIONS[0],
+            Self::Dummy => COMPANIONS[1],
+            Self::Expiry => COMPANIONS[2],
+        }
+    }
+}
+
+impl std::str::FromStr for OptionKind {
+    type Err = anyhow::Error;
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "emergency" => Ok(Self::Emergency),
+            "dummy" => Ok(Self::Dummy),
+            "expiry" => Ok(Self::Expiry),
+            _ => anyhow::bail!("Choose an emergency, dummy or expiry option"),
+        }
+    }
+}
+
+impl Options {
+    fn get(self, option: OptionKind) -> bool {
+        match option {
+            OptionKind::Emergency => self.emergency,
+            OptionKind::Dummy => self.dummy,
+            OptionKind::Expiry => self.expiry,
+        }
+    }
+
+    fn set(&mut self, option: OptionKind, enabled: bool) {
+        match option {
+            OptionKind::Emergency => self.emergency = enabled,
+            OptionKind::Dummy => self.dummy = enabled,
+            OptionKind::Expiry => self.expiry = enabled,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Record {
     schema: u32,
     enabled: bool,
+    #[serde(default)]
+    options: Options,
 }
 
 pub fn sidecar_path(path: &Path) -> PathBuf {
@@ -58,10 +117,14 @@ fn checked_metadata(path: &Path) -> Result<Option<Metadata>> {
     }
 }
 
-fn read(path: &Path) -> Result<bool> {
-    let path = sidecar_path(path);
+fn read(vault_path: &Path) -> Result<Record> {
+    let path = sidecar_path(vault_path);
     let Some(expected) = checked_metadata(&path)? else {
-        return Ok(false);
+        return Ok(Record {
+            schema: 2,
+            enabled: false,
+            options: Options::default(),
+        });
     };
     ensure!(
         expected.len() <= MAX_RECORD as u64,
@@ -81,17 +144,42 @@ fn read(path: &Path) -> Result<bool> {
         .take((MAX_RECORD + 1) as u64)
         .read_to_end(&mut bytes)?;
     ensure!(bytes.len() <= MAX_RECORD, "Oversized protection record");
-    let record: Record = serde_json::from_slice(&bytes)?;
-    ensure!(record.schema == 1, "Unsupported protection record");
-    Ok(record.enabled)
+    let mut record: Record = serde_json::from_slice(&bytes)?;
+    ensure!(
+        matches!(record.schema, 1 | 2),
+        "Unsupported protection record"
+    );
+    if record.schema == 1 && record.enabled {
+        // Preserve alpha9 behavior during migration. Only safe private records
+        // imply an existing toggle; actual trigger checks still validate their
+        // contents, purpose and ciphertext binding independently.
+        record.options = Options {
+            emergency: checked_metadata(&companion(vault_path, COMPANIONS[0]))?.is_some(),
+            dummy: checked_metadata(&companion(vault_path, COMPANIONS[1]))?.is_some(),
+            expiry: checked_metadata(&companion(vault_path, COMPANIONS[2]))?.is_some(),
+        };
+    }
+    Ok(record)
 }
 
 /// Trigger checks must fail closed even if a record is corrupt or inaccessible.
 pub fn enabled(path: &Path) -> Result<bool> {
-    Ok(read(path).unwrap_or(false))
+    Ok(read(path).is_ok_and(|record| record.enabled))
 }
 
-fn write(path: &Path, active: bool) -> Result<()> {
+/// Return only option-toggle choices. No password configuration state is exposed.
+pub fn options(path: &Path) -> Result<Options> {
+    Ok(match read(path) {
+        Ok(record) if record.enabled => record.options,
+        _ => Options::default(),
+    })
+}
+
+pub fn option_enabled(path: &Path, option: OptionKind) -> Result<bool> {
+    Ok(options(path)?.get(option))
+}
+
+fn write(path: &Path, active: bool, options: Options) -> Result<()> {
     let record_path = sidecar_path(path);
     let expected = checked_metadata(&record_path)?;
     let parent = record_path
@@ -107,8 +195,9 @@ fn write(path: &Path, active: bool) -> Result<()> {
         .as_file()
         .set_permissions(Permissions::from_mode(0o600))?;
     let bytes = serde_json::to_vec(&Record {
-        schema: 1,
+        schema: 2,
         enabled: active,
+        options,
     })?;
     ensure!(bytes.len() <= MAX_RECORD, "Oversized protection record");
     temporary.write_all(&bytes)?;
@@ -135,7 +224,7 @@ fn write(path: &Path, active: bool) -> Result<()> {
     Ok(())
 }
 
-fn clear_companions(path: &Path) -> Result<()> {
+fn clear_companions(path: &Path, suffixes: &[&str]) -> Result<()> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -144,7 +233,7 @@ fn clear_companions(path: &Path) -> Result<()> {
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(parent)?;
-    for suffix in COMPANIONS {
+    for suffix in suffixes {
         let candidate = companion(path, suffix);
         let Some(expected) = checked_metadata(&candidate).context(
             "Protection is off, but an unsafe companion could not be cleared; check its ownership and permissions before re-enabling",
@@ -183,15 +272,35 @@ pub fn enable(path: &Path) -> Result<()> {
     }
     // This ordering prevents old options from silently returning after a
     // disable or interrupted cleanup. A failure leaves the gate off.
-    write(path, false)?;
-    clear_companions(path)?;
-    write(path, true)
+    write(path, false, Options::default())?;
+    clear_companions(path, &COMPANIONS)?;
+    write(path, true, Options::default())
 }
 
 /// Disarm first. A cleanup failure must not leave any optional trigger active.
 pub fn disable(path: &Path) -> Result<()> {
-    write(path, false)?;
-    clear_companions(path)
+    write(path, false, Options::default())?;
+    clear_companions(path, &COMPANIONS)
+}
+
+/// Caller holds the real vault lock. Turning a flag off disarms it before
+/// cleanup; turning it on clears stale configuration before enabling editing.
+/// Repeating an already-enabled choice preserves its current configuration.
+pub fn set_option(path: &Path, option: OptionKind, active: bool) -> Result<()> {
+    let mut record = read(path)?;
+    ensure!(record.enabled || !active, "Enable vault protection first");
+    if active && record.options.get(option) {
+        // Upgrade an old master marker without changing active configuration.
+        return write(path, true, record.options);
+    }
+    record.options.set(option, false);
+    write(path, record.enabled, record.options)?;
+    clear_companions(path, &[option.suffix()])?;
+    if active {
+        record.options.set(option, true);
+        write(path, true, record.options)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -289,6 +398,74 @@ mod tests {
         assert!(enable(&path).is_err());
         assert!(!enabled(&path)?);
         assert_eq!(fs::read(&target)?, b"leave this alone");
+        assert_eq!(fs::read(&path)?, original);
+        Ok(())
+    }
+
+    #[test]
+    fn option_flags_do_not_reveal_configuration_and_reenable_erases_old_records() -> Result<()> {
+        let (_directory, path, original) = fixture()?;
+        enable(&path)?;
+        assert_eq!(options(&path)?, Options::default());
+        assert!(set_option(&path, OptionKind::Dummy, true).is_ok());
+        assert!(options(&path)?.dummy);
+        // A checked option still has no configured password; the flags do not
+        // distinguish this state from one with a subsequently saved verifier.
+        assert!(!companion(&path, COMPANIONS[1]).exists());
+        companion_fixture(&path, COMPANIONS[1])?;
+        set_option(&path, OptionKind::Dummy, true)?;
+        assert!(companion(&path, COMPANIONS[1]).exists());
+        set_option(&path, OptionKind::Dummy, false)?;
+        assert!(!options(&path)?.dummy);
+        assert!(!companion(&path, COMPANIONS[1]).exists());
+        companion_fixture(&path, COMPANIONS[1])?; // restored stale record
+        set_option(&path, OptionKind::Dummy, true)?;
+        assert!(!companion(&path, COMPANIONS[1]).exists());
+        disable(&path)?;
+        assert_eq!(options(&path)?, Options::default());
+        assert!(set_option(&path, OptionKind::Emergency, true).is_err());
+        enable(&path)?;
+        assert_eq!(options(&path)?, Options::default());
+        assert_eq!(fs::read(&path)?, original);
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_marker_preserves_existing_toggles_on_upgrade() -> Result<()> {
+        let (_directory, path, _) = fixture()?;
+        let mut marker = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(sidecar_path(&path))?;
+        marker.write_all(br#"{"schema":1,"enabled":true}"#)?;
+        companion_fixture(&path, COMPANIONS[0])?;
+        assert!(enabled(&path)?);
+        assert!(options(&path)?.emergency);
+        assert!(!options(&path)?.dummy);
+        set_option(&path, OptionKind::Emergency, true)?;
+        assert!(companion(&path, COMPANIONS[0]).exists());
+        let upgraded: serde_json::Value = serde_json::from_slice(&fs::read(sidecar_path(&path))?)?;
+        assert_eq!(upgraded["schema"], 2);
+        assert_eq!(upgraded["options"]["emergency"], true);
+        Ok(())
+    }
+
+    #[test]
+    fn unsafe_option_cleanup_disarms_only_that_toggle_before_reporting_failure() -> Result<()> {
+        let (directory, path, original) = fixture()?;
+        enable(&path)?;
+        set_option(&path, OptionKind::Dummy, true)?;
+        set_option(&path, OptionKind::Emergency, true)?;
+        let target = directory.path().join("leave-unrelated-file-alone");
+        fs::write(&target, b"unrelated contents")?;
+        std::os::unix::fs::symlink(&target, companion(&path, COMPANIONS[1]))?;
+        assert!(set_option(&path, OptionKind::Dummy, false).is_err());
+        assert!(!option_enabled(&path, OptionKind::Dummy)?);
+        assert!(option_enabled(&path, OptionKind::Emergency)?);
+        assert!(set_option(&path, OptionKind::Dummy, true).is_err());
+        assert!(!option_enabled(&path, OptionKind::Dummy)?);
+        assert_eq!(fs::read(&target)?, b"unrelated contents");
         assert_eq!(fs::read(&path)?, original);
         Ok(())
     }

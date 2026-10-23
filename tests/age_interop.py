@@ -4,6 +4,7 @@
 All credentials and files are disposable test fixtures. Passwords travel through
 a controlling terminal, never command arguments or environment variables.
 """
+import copy
 import fcntl
 import json
 import os
@@ -20,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PASS = "disposable age interop passphrase"
 
 
-def terminal_command(arguments):
+def terminal_command(arguments, password=PASS):
     master, slave = pty.openpty()
 
     def controlling_terminal():
@@ -43,7 +44,7 @@ def terminal_command(arguments):
                     break
                 buffer = (buffer + chunk)[-8192:]
                 if b"passphrase" in buffer.lower() and b":" in buffer:
-                    os.write(master, (PASS + "\n").encode())
+                    os.write(master, (password + "\n").encode())
                     buffer = b""
         if child.wait(timeout=10):
             raise RuntimeError("Debian age rejected the interoperability fixture")
@@ -94,18 +95,39 @@ def main():
             "storage_encryption": True, "expires_at": None,
         })
         fingerprint = peer.request("list")["keys"][0]["fingerprint"]
-        profile = peer.request("profile_save", profile_name="Independent age profile", profile_fingerprints=[fingerprint])["id"]
+        profile = peer.request("profile_save", profile_name="Independent age profile",
+                               profile_username="private pseudonym", profile_email="portable@example.invalid",
+                               profile_url="https://example.invalid/identity", profile_notes="Private identity notes",
+                               profile_fingerprints=[fingerprint])["id"]
         document = peer.request("document_save", title="Portable text", text="Stored inside the age vault", profile_id=profile)["id"]
         peer.request("notes_set", text="independent age compatibility fixture")
         peer.lock()
 
         terminal_command([age, "--decrypt", "--output", str(plaintext), str(original)])
         decoded = json.loads(plaintext.read_text())
-        assert decoded["application"] == "PGPCrypt" and decoded["schema"] == 5
+        assert decoded["application"] == "PGPCrypt" and decoded["schema"] == 6
         assert decoded["data"]["notes"] == "independent age compatibility fixture"
         assert len(decoded["data"]["certificates"]) == 1
         assert decoded["data"]["profiles"][0]["id"] == profile
+        assert decoded["data"]["profiles"][0]["username"] == "private pseudonym"
+        assert decoded["data"]["profiles"][0]["email"] == "portable@example.invalid"
+        assert decoded["data"]["profiles"][0]["url"] == "https://example.invalid/identity"
+        assert decoded["data"]["profiles"][0]["notes"] == "Private identity notes"
         assert decoded["data"]["documents"][0]["text"] == "Stored inside the age vault"
+
+        # Existing vaults may predate the new-password limit. Create this
+        # fixture with Debian's independent age implementation so PGPCrypt's
+        # creation policy cannot accidentally hide an unlock regression.
+        legacy_password = "legacy vault compatibility " * 8
+        assert len(legacy_password) > 128
+        legacy = directory / "existing-long-password.age"
+        terminal_command([age, "--passphrase", "--output", str(legacy), str(plaintext)],
+                         password=legacy_password)
+        peer = Peer()
+        peer.request("open", path=str(legacy), password=legacy_password)
+        assert peer.request("list")["keys"][0]["fingerprint"] == fingerprint
+        assert peer.request("document_get", document_id=document)["text"] == "Stored inside the age vault"
+        peer.lock()
 
         terminal_command([age, "--passphrase", "--output", str(external), str(plaintext)])
         peer = Peer()
@@ -115,18 +137,24 @@ def main():
         assert peer.request("document_get", document_id=document, profile_id=profile)["text"] == "Stored inside the age vault"
         peer.lock()
         # Recreate the previous age schemas using the independent writer.
-        for schema in (4, 3, 2, 1):
-            decoded["schema"] = schema
-            decoded["data"].pop("profiles", None)
-            decoded["data"].pop("documents", None)
+        for schema in (5, 4, 3, 2, 1):
+            previous_data = copy.deepcopy(decoded)
+            previous_data["schema"] = schema
+            if schema == 5:
+                for identity in previous_data["data"]["profiles"]:
+                    for field in ("username", "email", "url", "notes"):
+                        identity.pop(field, None)
+            else:
+                previous_data["data"].pop("profiles", None)
+                previous_data["data"].pop("documents", None)
             if schema < 4:
-                decoded["data"].pop("preferences", None)
+                previous_data["data"].pop("preferences", None)
             if schema < 3:
-                decoded["data"].pop("default_signing_key", None)
+                previous_data["data"].pop("default_signing_key", None)
             if schema == 1:
-                decoded["data"].pop("revocations", None)
-                decoded["data"].pop("idle_timeout_seconds", None)
-            plaintext.write_text(json.dumps(decoded))
+                previous_data["data"].pop("revocations", None)
+                previous_data["data"].pop("idle_timeout_seconds", None)
+            plaintext.write_text(json.dumps(previous_data))
             previous = directory / ("schema-" + str(schema) + ".age")
             terminal_command([age, "--passphrase", "--output", str(previous), str(plaintext)])
             peer = Peer()
@@ -134,10 +162,16 @@ def main():
             assert settings["default_signing_key"] == ""
             assert settings["preferences"]["auto_lock"] is False
             assert peer.request("list")["keys"][0]["fingerprint"] == fingerprint
-            assert peer.request("profiles_list")["profiles"] == []
-            assert peer.request("documents_list")["documents"] == []
+            if schema == 5:
+                restored = peer.request("profiles_list")["profiles"][0]
+                assert restored["id"] == profile and restored["fingerprints"] == [fingerprint]
+                assert all(restored[field] == "" for field in ("username", "email", "url", "notes"))
+                assert peer.request("document_get", document_id=document)["text"] == "Stored inside the age vault"
+            else:
+                assert peer.request("profiles_list")["profiles"] == []
+                assert peer.request("documents_list")["documents"] == []
             peer.lock()
-    print("age interoperability passed: Rust vault -> Debian age -> Rust vault; profiles/documents and schemas 1/2/3/4/5")
+    print("age interoperability passed: Rust vault -> Debian age -> Rust vault; profiles/documents and schemas 1/2/3/4/5/6")
 
 
 if __name__ == "__main__":

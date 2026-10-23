@@ -1,7 +1,7 @@
 # Profiles and saved documents
 
 The workspace has four navigation buttons: **Keys**, **Notepad**, **Identities**
-and **Settings**. All data described here stays inside the encrypted age/KDBX
+and **Vault settings**. All data described here stays inside the encrypted age/KDBX
 vault, except files deliberately imported/exported, recent-vault paths, and
 optional protection companion records described separately.
 
@@ -10,7 +10,12 @@ optional protection companion records described separately.
 **All** shows every key and saved document. The **+** tab creates a named profile.
 Profiles are categories: one key can belong to several, and a profile can be empty.
 Newly generated or imported keys join the selected profile automatically.
-Use **Identities** to rename profiles or change their key membership. Deleting a
+Use **Identities** to edit name, username, email, website and private notes,
+or change key membership. Creating an identity starts with those fields.
+Selecting an identity groups its associated keys first; column sorting applies
+within the associated and other-key groups. Search and status filters narrow
+the table. All key tables share identity, fingerprint, material, status,
+algorithm, creation, expiry and usage columns, with sortable, resizable headers. Deleting a
 profile keeps its keys and documents; its documents become unassigned and remain
 visible under All.
 
@@ -30,7 +35,12 @@ encrypted at rest.
 **Save output to vault** stores the output as a named encrypted document. The
 input can also be saved explicitly. Use the built-in document browser to load a
 saved document into the input, or delete a saved document. Loading does not change
-the saved copy. Editing text, pasting, importing or running crypto does not save
+the saved copy. Save updates the opened document by its stable ID; Save as new
+creates a separate document. New documents start as `untitled`; duplicate titles
+within a profile receive numbered suffixes. Properties changes a saved
+document's title or profile without changing its contents. The browser shows
+profiles and timestamps, supports search and sortable columns, and distinguishes
+documents with the same title in different profiles. Editing text, pasting, importing or running crypto does not save
 automatically. Save explicitly to retain changes before locking or closing.
 
 **Import text file** reads an ordinary UTF-8 file into the input. It is stored
@@ -60,8 +70,10 @@ full fingerprint over a trusted channel.
 
 ## Portable recovery
 
-age schema 5 stores `data.profiles` and `data.documents`. KDBX settings schema 4
-stores profiles in protected `PGPCrypt.Profiles` JSON. Each saved document is a
+age schema 6 stores `data.profiles` and `data.documents`. KDBX settings schema 5
+stores profiles in protected `PGPCrypt.Profiles` JSON and ordinary identity
+entries. Identity fields map to Title, UserName, Email, URL and Notes for direct
+reading/editing in KeePassXC. Each saved document is a
 normal KeePass entry with its title and protected `Notes` content. It can be read
 and copied in KeePassXC without PGPCrypt. Both conversion directions preserve
 profiles, membership and saved documents. Older PGPCrypt versions reject the new
@@ -72,7 +84,7 @@ schemas; keep a backup before upgrading.
 Landing-page recent entries open that vault's password screen in one click.
 Only a successful open/create adds an entry; no password or contents are saved.
 Remembering is on by default. Disable **Remember recent vaults on this device**
-in Settings to clear stored paths and stop recording them.
+in Vault settings to clear stored paths and stop recording them.
 
 This is an explicit exception to keeping vault information inside encryption:
 up to five local vault paths are stored outside the vault in a private file

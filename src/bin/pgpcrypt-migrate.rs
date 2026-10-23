@@ -23,7 +23,7 @@ fn main() -> Result<()> {
     let data = pgpcrypt::legacy_vault::read(old, &password)?;
     drop(password);
     let password = Zeroizing::new(rpassword::prompt_password(
-        "New vault passphrase (16+ characters): ",
+        "New vault password/passphrase (up to 128 characters): ",
     )?);
     let confirmation = Zeroizing::new(rpassword::prompt_password("Confirm new passphrase: ")?);
     ensure!(*password == *confirmation, "Passphrases do not match");

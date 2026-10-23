@@ -169,6 +169,7 @@ pub struct KeyOptions {
 
 pub fn generate_with_options(options: &KeyOptions, password: &str) -> Result<(Cert, String)> {
     use openpgp::cert::{CertBuilder, CipherSuite};
+    crate::password::validate_new_password(password)?;
     let name = options.name.trim();
     let email = options.email.trim();
     let comment = options.comment.trim();
@@ -181,10 +182,10 @@ pub fn generate_with_options(options: &KeyOptions, password: &str) -> Result<(Ce
         "Email or comment is too long"
     );
     ensure!(
-        [name, email, comment]
-            .iter()
-            .all(|s| !s.chars().any(char::is_control)),
-        "Identity fields cannot contain control characters"
+        [name, email, comment].iter().all(|s| !s
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '\u{fffe}' | '\u{ffff}'))),
+        "Identity fields cannot contain control characters or invalid XML characters"
     );
     // Without an address, construct the conventional name/comment form without
     // introducing a fake or required email address.
@@ -347,7 +348,27 @@ pub fn private_armor(cert: &Cert) -> Result<Zeroizing<String>> {
     Ok(Zeroizing::new(std::str::from_utf8(&bytes)?.to_owned()))
 }
 
+/// Require successful authentication of every encrypted secret packet before
+/// displaying or exporting a certificate. Decrypt only temporary clones for
+/// this check: the exported certificate retains its original packet protection.
+/// Certificates containing unprotected packets also need the caller's separate
+/// vault-password check before they can leave the encrypted vault.
+pub fn authenticated_private_armor(cert: &Cert, password: &str) -> Result<Zeroizing<String>> {
+    ensure!(cert.is_tsk(), "Selected key has no private material");
+    let mut budget = SecretUnlockBudget::default();
+    for ka in cert.keys().secret() {
+        if ka.key().secret().is_encrypted() {
+            // Do not accept a usable signing subkey as authorization for other
+            // secret packets which may carry different passwords.
+            let unlocked = budget.unlock(ka.key().clone(), password)?;
+            drop(unlocked);
+        }
+    }
+    private_armor(cert)
+}
+
 pub fn protect_private_key(cert: &Cert, old_password: &str, new_password: &str) -> Result<Cert> {
+    crate::password::validate_new_password(new_password)?;
     ensure!(cert.is_tsk(), "Selected key has no private material");
     let mut packets = Vec::new();
     let mut budget = SecretUnlockBudget::default();
@@ -432,6 +453,7 @@ pub fn add_subkey(
     subkey_password: &str,
 ) -> Result<Cert> {
     use openpgp::cert::{CipherSuite, KeyBuilder};
+    crate::password::validate_new_password(subkey_password)?;
     let policy = StandardPolicy::new();
     validate_for_new_operation(cert, &policy)?;
     let valid = cert.with_policy(&policy, None)?;
@@ -826,6 +848,21 @@ mod tests {
     }
 
     #[test]
+    fn new_key_identity_fields_reject_nonportable_xml_characters() {
+        for invalid in ['\u{fffe}', '\u{ffff}'] {
+            let mut settings = options("cv25519", "subkeys");
+            settings.name.push(invalid);
+            assert!(generate_with_options(&settings, "").is_err());
+            settings = options("cv25519", "subkeys");
+            settings.email = format!("fixture{invalid}@example.invalid");
+            assert!(generate_with_options(&settings, "").is_err());
+            settings = options("cv25519", "subkeys");
+            settings.comment.push(invalid);
+            assert!(generate_with_options(&settings, "").is_err());
+        }
+    }
+
+    #[test]
     fn optional_and_short_key_passwords_support_crypto_and_removal() -> Result<()> {
         for password in ["", "x"] {
             let (cert, _) = generate_with_options(&options("cv25519", "subkeys"), password)?;
@@ -863,6 +900,89 @@ mod tests {
             assert!(private_armor(&plain)?.contains("BEGIN PGP PRIVATE KEY BLOCK"));
             assert!(protected_private_armor(&plain).is_err());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn private_export_authenticates_all_secret_packets_without_changing_protection() -> Result<()> {
+        let mut settings = options("cv25519", "subkeys");
+        settings.expires_at = None;
+        let (cert, _) = generate_with_options(&settings, "export password")?;
+        let before = encode(&cert)?;
+        for password in ["", "wrong"] {
+            let error = authenticated_private_armor(&cert, password).unwrap_err();
+            assert!(error.is::<PasswordRequired>());
+        }
+        let exported = authenticated_private_armor(&cert, "export password")?;
+        let parsed = parse(exported.as_bytes())?;
+        assert_eq!(encode(&parsed)?.as_slice(), before.as_slice());
+        assert_eq!(encode(&cert)?.as_slice(), before.as_slice());
+        assert!(
+            parsed
+                .keys()
+                .secret()
+                .all(|ka| ka.key().secret().is_encrypted())
+        );
+        assert!(sign("exported fixture", &parsed, "wrong").is_err());
+        sign("exported fixture", &parsed, "export password")?;
+
+        // A password which unlocks a single signing packet must not authorize
+        // export of primary/encryption packets carrying another password.
+        let mixed = add_subkey(
+            &cert,
+            &SubkeyOptions {
+                algorithm: "cv25519".into(),
+                purpose: "sign".into(),
+                expires_at: None,
+            },
+            "export password",
+            "different subkey password",
+        )?;
+        assert!(
+            authenticated_private_armor(&mixed, "export password")
+                .unwrap_err()
+                .is::<PasswordRequired>()
+        );
+        assert!(
+            authenticated_private_armor(&mixed, "different subkey password")
+                .unwrap_err()
+                .is::<PasswordRequired>()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn new_key_password_character_limit_preserves_legacy_unlocking() -> Result<()> {
+        let settings = options("cv25519", "subkeys");
+        let allowed = "é".repeat(128);
+        let too_long = "é".repeat(129);
+        assert!(generate_with_options(&settings, &too_long).is_err());
+        let (cert, _) = generate_with_options(&settings, &allowed)?;
+        assert!(protect_private_key(&cert, &allowed, &too_long).is_err());
+        assert!(
+            add_subkey(
+                &cert,
+                &SubkeyOptions {
+                    algorithm: "cv25519".into(),
+                    purpose: "sign".into(),
+                    expires_at: None,
+                },
+                &allowed,
+                &too_long,
+            )
+            .is_err()
+        );
+        // Existing imported packets may exceed the new creation limit. Such
+        // passwords must remain valid for signing, export and replacement.
+        let long_legacy_password = "legacy".repeat(32);
+        let (legacy, _) =
+            openpgp::cert::CertBuilder::general_purpose(Some("Legacy password fixture"))
+                .set_password(Some(long_legacy_password.clone().into()))
+                .generate()?;
+        sign("legacy fixture", &legacy, &long_legacy_password)?;
+        authenticated_private_armor(&legacy, &long_legacy_password)?;
+        let replaced = protect_private_key(&legacy, &long_legacy_password, "x")?;
+        sign("replacement fixture", &replaced, "x")?;
         Ok(())
     }
 
@@ -1008,6 +1128,20 @@ mod tests {
         // this is distinct from our choice to generate an unprotected packet.
         let encrypted = key.clone().encrypt_secret(&"".into())?;
         assert!(encrypted.secret().is_encrypted());
+        let empty_password_cert = cert
+            .clone()
+            .insert_packets_merge(openpgp::Packet::from(encrypted.clone()), |_old, new| {
+                Ok(new)
+            })?
+            .0;
+        assert!(
+            parse(authenticated_private_armor(&empty_password_cert, "")?.as_bytes())?
+                .primary_key()
+                .key()
+                .parts_as_secret()?
+                .secret()
+                .is_encrypted()
+        );
         assert!(
             !SecretUnlockBudget::default()
                 .unlock(encrypted, "")?

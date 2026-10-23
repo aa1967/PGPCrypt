@@ -3,6 +3,7 @@ pub mod expiry;
 mod kdbx;
 #[cfg(feature = "legacy-migration")]
 pub mod legacy_vault;
+pub mod password;
 pub mod pgp;
 pub mod protection;
 pub mod qubes;

@@ -123,3 +123,23 @@ read-only Vault without decrypting real contents. Expiry is checked before any
 vault decryption, and only successful normal worker opens reset it. Destruction
 is best-effort and cannot erase snapshots or guarantee physical erasure. See
 [WORKSPACE.md](WORKSPACE.md) and [VAULT_PROTECTION.md](VAULT_PROTECTION.md).
+
+## Alpha10 identities and action authentication
+
+Age schema 6 and KDBX settings schema 5 add editable private identity fields.
+KDBX identity entries expose standard Title/UserName/URL/Notes plus Email,
+while stable IDs and protected profile JSON retain organizational membership.
+Document properties and content saves share stable IDs and collision-safe names.
+
+The protection marker schema 2 keeps master and per-option enable flags separate
+from password/policy records. Disarming writes the flag first, then removes the
+configuration. Reuse checks authenticate configured fixed-cost salted verifiers
+without depending on their active ciphertext binding; trigger matching still
+requires the binding. Old schema-1 markers infer enabled options from private
+companions. Missing or unsafe records continue to disarm triggers.
+
+Explicit private export uses bounded secret-packet password verification and
+vault-password confirmation when any packet is unprotected. It serializes the
+original certificate rather than emitting the temporary decrypted copies used
+for authentication. New-password validation is shared by backends; legacy unlock
+is kept compatible.

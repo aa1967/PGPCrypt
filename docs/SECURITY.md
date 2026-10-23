@@ -19,7 +19,7 @@ saved documents, notes and schema
 metadata are inside encryption. There is no default GnuPG home/agent access,
 background networking, telemetry, plaintext document autosave or external keyring
 index. The user-requested recent-vault feature stores paths outside encryption
-on this device by default; disable it in Settings to clear and stop recording
+on this device by default; disable it in Vault settings to clear and stop recording
 them. Paths may reveal identifying names, even without any PGP key metadata.
 Notepad documents saved to the vault remain inside its encryption. Explicit
 Export writes an ordinary file outside the vault; readable output requires
@@ -47,6 +47,20 @@ combined Argon2 work budget). Unsupported S2Ks fail explicitly. This caps
 password-derivation work, not every possible parser/CPU cost. Validated self-bound
 identities are displayed; ownership still needs a verified full fingerprint.
 Text signing uses the standard cleartext framework; signing does not conceal text.
+
+New passwords have no minimum or complexity requirement and are bounded to
+128 Unicode characters. Local strength estimates are advisory. Older longer
+passwords remain accepted for unlocking. Empty and short passwords have little
+or no resistance to offline guessing; the limit is an input/work bound, not an
+additional cryptographic protection. Passwords are used exactly as entered,
+without trimming or normalization.
+
+Private-key display/export verifies the password for every protected secret
+packet without removing that protection from the export. Exports containing
+unprotected packets also require the vault password. Keys with different packet
+passwords cannot currently be exported through this single-password workflow;
+normalize their protection first. These checks govern explicit actions inside
+an already-unlocked trusted session; they do not isolate keys from that session.
 
 The Qt6 session UI and worker disable core dumps/process dumpability. The worker
 owns stored/generated private keys. Pasted private-key imports necessarily pass

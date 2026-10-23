@@ -55,12 +55,18 @@ packets inside the encrypted container; take care when copying those packets out
 
 The `Vault notes and settings` entry holds the protected `Notes` field and
 `PGPCrypt.IdleTimeoutSeconds`, plus protected `PGPCrypt.DefaultSigningKey`
-(empty means no default). The settings entry uses `PGPCrypt.Schema=4`; key
+(empty means no default). The settings entry uses `PGPCrypt.Schema=5`; key
 entries remain schema 1. Older settings are read with defaults for missing fields. Protected
 `PGPCrypt.Preferences` holds JSON for themes, locking, clipboard clearing and
 Qubes opt-in; all new automatic behaviors default off.
 Protected `PGPCrypt.Profiles` contains profile IDs, names and key memberships as
-JSON. Saved text documents are ordinary entries in the PGPCrypt group with
+JSON, including username, email, URL and private notes. Each identity also has
+a standard readable entry (`PGPCrypt.Type=identity`, `PGPCrypt.Schema=1`,
+`PGPCrypt.ProfileId`) with Title, UserName, Email, URL and protected Notes.
+Those identity-entry fields are authoritative when edited in KeePassXC;
+protected JSON retains stable IDs and memberships.
+
+Saved text documents are ordinary entries in the PGPCrypt group with
 `PGPCrypt.Type=document`, `PGPCrypt.Schema=1`, Title, protected Notes, and
 `PGPCrypt.DocumentId`, `PGPCrypt.ProfileId`, `PGPCrypt.CreatedAt` and
 `PGPCrypt.UpdatedAt`. Read or copy their Notes in KeePassXC. Existing document
@@ -87,7 +93,7 @@ closed rather than being intentionally discarded.
 
 Unlock the source, save any note edits, and select **Save converted copy…**.
 Choose the target format, a new filename and a new confirmed password/passphrase
-(at least 16 characters). Conversion writes ciphertext atomically with mode
+(up to 128 Unicode characters, with no enforced minimum). Conversion writes ciphertext atomically with mode
 0600, refuses existing files and symbolic links, and leaves the source bytes
 unchanged. No plaintext temporary file is created. The current session continues
 using the original; lock and open the destination to switch.

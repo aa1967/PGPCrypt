@@ -30,6 +30,13 @@ impl Purpose {
         }
     }
 
+    fn option(self) -> crate::protection::OptionKind {
+        match self {
+            Self::Emergency => crate::protection::OptionKind::Emergency,
+            Self::Dummy => crate::protection::OptionKind::Dummy,
+        }
+    }
+
     fn context(self) -> &'static [u8] {
         match self {
             Self::Emergency => b"PGPCrypt emergency password v1",
@@ -180,25 +187,28 @@ fn read_record(path: &Path, purpose: Purpose) -> Result<Option<Record>> {
     Ok(Some(record))
 }
 
-fn check_record_destination(path: &Path) -> Result<bool> {
+fn check_record_destination(path: &Path) -> Result<Option<Metadata>> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => {
             validate_private(&metadata, true)?;
-            Ok(true)
+            Ok(Some(metadata))
         }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
     }
 }
 
 fn write_record(path: &Path, record: &Record) -> Result<()> {
     let path = record_path(path, record.purpose);
-    let existed = check_record_destination(&path)?;
+    let expected = check_record_destination(&path)?;
     let parent = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let directory = File::open(parent)?;
+    let directory = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(parent)?;
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     temp.as_file()
         .set_permissions(Permissions::from_mode(0o600))?;
@@ -209,12 +219,16 @@ fn write_record(path: &Path, record: &Record) -> Result<()> {
     );
     temp.write_all(&bytes)?;
     temp.as_file().sync_all()?;
-    let exists_now = check_record_destination(&path)?;
+    let current = check_record_destination(&path)?;
     ensure!(
-        exists_now == existed,
+        match (&expected, &current) {
+            (None, None) => true,
+            (Some(before), Some(now)) => same_file(before, now),
+            _ => false,
+        },
         "Alternative-password record changed while saving"
     );
-    if existed {
+    if expected.is_some() {
         temp.persist(&path).map_err(|error| error.error)?;
     } else {
         temp.persist_noclobber(&path).map_err(|error| error.error)?;
@@ -262,7 +276,7 @@ fn record_status(path: &Path, ciphertext: &[u8], purpose: Purpose) -> Result<Sta
         return Ok(Status::default());
     };
     ensure!(ciphertext.len() <= MAX_VAULT, "Oversized vault");
-    let armed = crate::protection::enabled(path)?
+    let armed = crate::protection::option_enabled(path, purpose.option())?
         && digest(ciphertext)? == record.ciphertext_sha256
         && snapshot_for(path, purpose).is_ok_and(|current| current == ciphertext);
     Ok(Status {
@@ -274,8 +288,8 @@ fn record_status(path: &Path, ciphertext: &[u8], purpose: Purpose) -> Result<Sta
 /// The caller must hold the vault lock and reject the normal unlock password.
 pub fn configure(path: &Path, ciphertext: &[u8], emergency_password: &str) -> Result<()> {
     ensure!(
-        crate::protection::enabled(path)?,
-        "Enable vault protection before configuring alternative passwords"
+        crate::protection::option_enabled(path, Purpose::Emergency.option())?,
+        "Enable the emergency-password option before setting its password"
     );
     configure_record(path, ciphertext, emergency_password, Purpose::Emergency)
 }
@@ -283,8 +297,8 @@ pub fn configure(path: &Path, ciphertext: &[u8], emergency_password: &str) -> Re
 /// The caller must reject normal/emergency passwords and hold the vault lock.
 pub fn dummy_configure(path: &Path, ciphertext: &[u8], password: &str) -> Result<()> {
     ensure!(
-        crate::protection::enabled(path)?,
-        "Enable vault protection before configuring alternative passwords"
+        crate::protection::option_enabled(path, Purpose::Dummy.option())?,
+        "Enable the dummy-password option before setting its password"
     );
     configure_record(path, ciphertext, password, Purpose::Dummy)
 }
@@ -295,11 +309,15 @@ fn configure_record(
     password: &str,
     purpose: Purpose,
 ) -> Result<()> {
+    crate::password::validate_new_password(password)?;
+    let other = match purpose {
+        Purpose::Emergency => Purpose::Dummy,
+        Purpose::Dummy => Purpose::Emergency,
+    };
     ensure!(
-        password.chars().count() >= 16,
-        "Use at least 16 characters for the alternative password"
+        !password_matches_configured(path, password, other)?,
+        "Choose different emergency and dummy passwords"
     );
-    ensure!(password.len() <= 1024, "Alternative password is too long");
     ensure!(
         ciphertext.len() <= MAX_VAULT && !ciphertext.is_empty(),
         "Invalid vault size"
@@ -330,38 +348,43 @@ fn configure_record(
         "Vault changed; reopen it before configuring alternative passwords"
     );
     ensure!(
-        crate::protection::enabled(path)?,
-        "Vault protection is disabled"
+        crate::protection::option_enabled(path, purpose.option())?,
+        "This vault-protection option is disabled"
     );
     write_record(path, &record)
 }
 
+/// Disable the option first, then erase its verifier configuration.
 pub fn disable(path: &Path) -> Result<()> {
-    disable_record(path, Purpose::Emergency)
+    crate::protection::set_option(path, Purpose::Emergency.option(), false)
 }
 
 pub fn dummy_disable(path: &Path) -> Result<()> {
-    disable_record(path, Purpose::Dummy)
+    crate::protection::set_option(path, Purpose::Dummy.option(), false)
 }
 
-fn disable_record(path: &Path, purpose: Purpose) -> Result<()> {
-    let path = record_path(path, purpose);
-    if !check_record_destination(&path)? {
-        return Ok(());
-    }
-    let file = open_private(&path, false, true)?;
-    let current = fs::symlink_metadata(&path)?;
-    ensure!(
-        same_file(&file.metadata()?, &current),
-        "Alternative-password record changed"
-    );
-    fs::remove_file(&path)?;
-    let parent = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or(Path::new("."));
-    File::open(parent)?.sync_all()?;
-    Ok(())
+/// Used only while configuring passwords, never for authorizing an unlock.
+/// Check a valid salted verifier even if its ciphertext binding is stale. A
+/// malformed or unsafe record is an error, so it cannot silently allow reuse.
+pub fn emergency_password_matches_configured(path: &Path, password: &str) -> Result<bool> {
+    password_matches_configured(path, password, Purpose::Emergency)
+}
+
+pub fn dummy_password_matches_configured(path: &Path, password: &str) -> Result<bool> {
+    password_matches_configured(path, password, Purpose::Dummy)
+}
+
+fn password_matches_configured(path: &Path, password: &str, purpose: Purpose) -> Result<bool> {
+    let Some(record) = read_record(path, purpose)? else {
+        return Ok(false);
+    };
+    argon2::verify_raw(
+        password.as_bytes(),
+        &record.salt,
+        &record.verifier,
+        &config(purpose),
+    )
+    .map_err(Into::into)
 }
 
 /// A stale, missing or malformed record never prevents normal vault opening and
@@ -380,6 +403,9 @@ pub fn refresh_after_save(path: &Path, previous: &[u8], committed: &[u8]) -> Res
 }
 
 fn refresh_record(path: &Path, previous: &[u8], committed: &[u8], purpose: Purpose) -> Result<()> {
+    if !crate::protection::option_enabled(path, purpose.option())? {
+        return Ok(());
+    }
     let Some(mut record) = read_record(path, purpose)? else {
         return Ok(());
     };
@@ -401,7 +427,7 @@ fn refresh_record(path: &Path, previous: &[u8], committed: &[u8], purpose: Purpo
 /// Non-destructive check for callers already holding the vault lock. This does
 /// not authorize writing, reveal real contents, or acquire a second flock.
 pub fn emergency_matches(path: &Path, password: &str) -> Result<bool> {
-    if !crate::protection::enabled(path)? {
+    if !crate::protection::option_enabled(path, Purpose::Emergency.option())? {
         return Ok(false);
     }
     Ok(matching_snapshot(path, password, Purpose::Emergency)?.is_some())
@@ -410,13 +436,16 @@ pub fn emergency_matches(path: &Path, password: &str) -> Result<bool> {
 /// A dummy match must be implemented by the caller as an empty read-only
 /// session. The companion record and behavior are forensically distinguishable.
 pub fn dummy_matches(path: &Path, password: &str) -> Result<bool> {
-    if !crate::protection::enabled(path)? {
+    if !crate::protection::option_enabled(path, Purpose::Dummy.option())? {
         return Ok(false);
     }
     Ok(matching_snapshot(path, password, Purpose::Dummy)?.is_some())
 }
 
 fn matching_snapshot(path: &Path, password: &str, purpose: Purpose) -> Result<Option<Vec<u8>>> {
+    if !crate::protection::option_enabled(path, purpose.option())? {
+        return Ok(None);
+    }
     let record = match read_record(path, purpose) {
         Ok(Some(record)) => record,
         Ok(None) | Err(_) => return Ok(None),
@@ -436,7 +465,7 @@ fn matching_snapshot(path: &Path, password: &str, purpose: Purpose) -> Result<Op
     )? {
         return Ok(None);
     }
-    if !crate::protection::enabled(path)? {
+    if !crate::protection::option_enabled(path, purpose.option())? {
         return Ok(None);
     }
     Ok(Some(current))
@@ -446,7 +475,7 @@ fn matching_snapshot(path: &Path, password: &str, purpose: Purpose) -> Result<Op
 /// only after the complete logical file was overwritten and synced. A matched
 /// password with an uncertain/error outcome returns DestructionTriggered.
 pub fn check_and_destroy(path: &Path, password: &str) -> Result<bool> {
-    if !crate::protection::enabled(path)? {
+    if !crate::protection::option_enabled(path, Purpose::Emergency.option())? {
         return Ok(false);
     }
     if !matches!(read_record(path, Purpose::Emergency), Ok(Some(_))) {
@@ -458,14 +487,19 @@ pub fn check_and_destroy(path: &Path, password: &str) -> Result<bool> {
     };
     // After a match, all details use the same outward error: do not reveal the
     // feature through a special error code or claim destruction succeeded.
-    destroy_matching(path, &current).map_err(|_| anyhow::Error::new(DestructionTriggered))?;
+    destroy_matching(path, &current, Purpose::Emergency.option())
+        .map_err(|_| anyhow::Error::new(DestructionTriggered))?;
     Ok(true)
 }
 
-pub(crate) fn destroy_matching(path: &Path, current: &[u8]) -> Result<()> {
+pub(crate) fn destroy_matching(
+    path: &Path,
+    current: &[u8],
+    option: crate::protection::OptionKind,
+) -> Result<()> {
     ensure!(
-        crate::protection::enabled(path)?,
-        "Vault protection is disabled"
+        crate::protection::option_enabled(path, option)?,
+        "This vault-protection option is disabled"
     );
     ensure!(
         !current.is_empty() && current.len() <= MAX_VAULT,
@@ -483,8 +517,8 @@ pub(crate) fn destroy_matching(path: &Path, current: &[u8]) -> Result<()> {
     validate_private(&named, false)?;
     ensure!(same_file(&metadata, &named), "Vault path changed");
     ensure!(
-        crate::protection::enabled(path)?,
-        "Vault protection is disabled"
+        crate::protection::option_enabled(path, option)?,
+        "This vault-protection option is disabled"
     );
     // Never truncate: every attempted write stays within the original length.
     file.seek(SeekFrom::Start(0))?;
@@ -518,6 +552,8 @@ mod tests {
             .open(&path)?;
         file.write_all(&bytes)?;
         crate::protection::enable(&path)?;
+        crate::protection::set_option(&path, Purpose::Emergency.option(), true)?;
+        crate::protection::set_option(&path, Purpose::Dummy.option(), true)?;
         Ok((dir, path, bytes))
     }
 
@@ -740,6 +776,63 @@ mod tests {
         assert!(dummy_status(&path, &committed)?.armed);
         assert!(dummy_matches(&path, DUMMY_PASSWORD)?);
         assert_eq!(fs::read(&path)?, committed);
+        Ok(())
+    }
+
+    #[test]
+    fn empty_and_short_passwords_use_unique_salts_and_duplicate_checks_include_stale_records()
+    -> Result<()> {
+        let (_dir, path, original) = fixture()?;
+        configure(&path, &original, "")?;
+        assert!(emergency_password_matches_configured(&path, "")?);
+        assert!(dummy_configure(&path, &original, "").is_err());
+        let first: Record = serde_json::from_slice(&fs::read(sidecar_path(&path))?)?;
+        configure(&path, &original, "x")?;
+        let second: Record = serde_json::from_slice(&fs::read(sidecar_path(&path))?)?;
+        assert_ne!(first.salt, second.salt);
+        assert_ne!(first.verifier, second.verifier);
+        dummy_configure(&path, &original, "y")?;
+        assert!(configure(&path, &original, "y").is_err());
+        assert!(dummy_password_matches_configured(&path, "y")?);
+        assert!(configure(&path, &original, &"x".repeat(129)).is_err());
+        let outside = vec![0x7f; original.len()];
+        fs::write(&path, &outside)?;
+        assert!(!emergency_matches(&path, "x")?);
+        assert!(emergency_password_matches_configured(&path, "x")?);
+        assert!(dummy_configure(&path, &outside, "x").is_err());
+        fs::write(sidecar_path(&path), b"malformed verifier")?;
+        assert!(emergency_password_matches_configured(&path, "x").is_err());
+        assert!(dummy_configure(&path, &outside, "z").is_err());
+        assert_eq!(fs::read(&path)?, outside);
+        Ok(())
+    }
+
+    #[test]
+    fn option_off_erases_verifier_and_on_requires_a_new_password() -> Result<()> {
+        let (_dir, path, original) = fixture()?;
+        configure(&path, &original, PASSWORD)?;
+        dummy_configure(&path, &original, DUMMY_PASSWORD)?;
+        let old_record = fs::read(dummy_sidecar_path(&path))?;
+        dummy_disable(&path)?;
+        assert!(!crate::protection::options(&path)?.dummy);
+        assert!(!dummy_sidecar_path(&path).exists());
+        assert!(!dummy_matches(&path, DUMMY_PASSWORD)?);
+        assert!(dummy_configure(&path, &original, DUMMY_PASSWORD).is_err());
+        assert!(emergency_matches(&path, PASSWORD)?);
+        // Restoring a stale companion cannot override the separate option flag.
+        let mut restored = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(dummy_sidecar_path(&path))?;
+        restored.write_all(&old_record)?;
+        assert!(!dummy_matches(&path, DUMMY_PASSWORD)?);
+        crate::protection::set_option(&path, Purpose::Dummy.option(), true)?;
+        assert!(!dummy_sidecar_path(&path).exists());
+        assert!(!dummy_matches(&path, DUMMY_PASSWORD)?);
+        dummy_configure(&path, &original, "new")?;
+        assert!(dummy_matches(&path, "new")?);
+        assert_eq!(fs::read(&path)?, original);
         Ok(())
     }
 }
