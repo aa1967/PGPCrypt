@@ -20,7 +20,7 @@ set -- /usr/bin/bwrap --die-with-parent --new-session --unshare-user --unshare-n
     --tmpfs "$HOME/.config" --tmpfs "$HOME/.local" --tmpfs "$HOME/.cache" \
     --setenv XDG_CONFIG_HOME "$HOME/.config" --setenv XDG_DATA_HOME "$HOME/.local/share" \
     --setenv XDG_STATE_HOME "$HOME/.local/state" --setenv XDG_CACHE_HOME "$HOME/.cache" \
-    --setenv PGPCRYPT_SANDBOX 1 --setenv QT_QPA_PLATFORMTHEME '' \
+    --setenv PGPCRYPT_SANDBOX 1 --setenv QT_X11_NO_MITSHM 1 --setenv QT_QPA_PLATFORMTHEME '' \
     --setenv QT_USE_PORTAL 0 --setenv GTK_USE_PORTAL 0 --setenv GIO_USE_VFS local \
     --setenv DBUS_SESSION_BUS_ADDRESS unix:path=/tmp/pgpcrypt-no-session-bus \
     --setenv DBUS_SYSTEM_BUS_ADDRESS unix:path=/tmp/pgpcrypt-no-system-bus

@@ -36,6 +36,7 @@ jobs:
         run: ./scripts/build-deb.sh
       - name: Check package and container interoperability
         run: |
+          ./tests/removable_policy.sh
           python3 tests/sandbox_launcher.py
           python3 tests/age_interop.py
           python3 tests/kdbx_interop.py
