@@ -869,8 +869,15 @@ private:
             palette.setColor(QPalette::ToolTipBase,base); palette.setColor(QPalette::ToolTipText,text); palette.setColor(QPalette::PlaceholderText,muted);
             for(auto role:{QPalette::Text,QPalette::WindowText,QPalette::ButtonText}) palette.setColor(QPalette::Disabled,role,muted);
             palette.setColor(QPalette::Link,accent);
+            palette.setColor(QPalette::Mid,background.lighter(145)); palette.setColor(QPalette::Midlight,background.lighter(120));
+            palette.setColor(QPalette::Dark,base.darker(125)); palette.setColor(QPalette::Light,background.lighter(160)); palette.setColor(QPalette::Shadow,base.darker(160));
         }
         qApp->setPalette(palette);
+        // Styled item views cache palette() colors. Refresh them after theme
+        // changes so tables and lists follow the same theme as the editors.
+        for(auto* widget:findChildren<QWidget*>()) if(!widget->styleSheet().isEmpty()) {
+            const auto sheet=widget->styleSheet(); widget->setPalette(palette); widget->setStyleSheet({}); widget->setStyleSheet(sheet);
+        }
         clipboardTimer.stop(); selectionTimer.stop();
         if(clipboardSeconds>0) { if(qApp->clipboard()->ownsClipboard()) clipboardTimer.start(clipboardSeconds*1000); if(qApp->clipboard()->ownsSelection()) selectionTimer.start(clipboardSeconds*1000); }
         if(sessionWarning) sessionWarning->setText(sessionReadOnly?QString("Read-only vault. Changes cannot be saved."):autoLock?"Locks after "+QString::number(idleTimeoutSeconds/60)+" minutes idle. Change in Settings.":"Auto-lock is off. Press Ctrl+L to lock. Change in Settings.");
