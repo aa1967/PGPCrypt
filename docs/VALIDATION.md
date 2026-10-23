@@ -1,5 +1,52 @@
 # Validation history
 
+## Alpha11 evidence
+
+Source `643d120` and follow-up fixes `2dbe6c6`, `656b8f2`, `5d103ca` and
+`0558422` were pushed before their affected functional checks. All 72 Rust
+checks passed across the final combined runs: 56 core, 4 protection protocol,
+1 GnuPG interoperability and 11 worker/lifecycle checks. The last document
+conversion assertion was rerun by itself after correcting an ordering assumption:
+actual identity groups change traversal order; stable IDs and all document
+properties remained equal. No product behavior changed for that assertion.
+
+KDBX tests covered actual identity groups, group rename, shared-key references,
+reference removal, document moves, schema-5 migration preserving entry IDs,
+history and custom fields, malformed-group/forged-reference rejection and one
+canonical copy of private armor. Group IDs use a `profile:` prefix because the
+upstream custom-data parser otherwise infers bare hex text as Base64 binary.
+Independent KeePassXC 2.7.10 read and edited groups/fields, moved documents,
+removed a membership reference, preserved canonical keys/unrelated entries and
+passed stale-write refusal and age conversion. Independent Debian age
+interoperability passed for schema 7 and legacy schemas 1–6. Existing independent
+GnuPG encrypt/decrypt and sign/verify checks passed.
+
+Protocol checks covered default-on and persisted-off Notepad layout, typed
+verification failures with no successful payload or stale signer metadata,
+ordinary dummy status, document counts after moves/deletion/conversion, and
+refusal of duplicate certificate fingerprints before a public copy could
+replace private material during conversion.
+
+Packaged Qt checks passed in age and KDBX for one shared Notepad widget,
+embedded/separate-window toggles, mirrored profiles, unsaved-text retention,
+identity overview/counts and draft preservation, public-key copy, neutral
+read-only status, bounded/sanitized activity filtering, explicit valid/altered
+signature comparisons and failure recovery, protection setup/reset and
+lock cleanup. Worker termination and supervisor process replacement passed.
+The separate Notepad layout was visually inspected offscreen. Package checks
+covered runtime dependencies/no RPATH, ownership/modes, sources/licenses,
+Qubes handlers, security-library minimum and writable-path guidance. Rust
+formatting, all-target Clippy and Qt warnings-as-errors compilation passed.
+Final documentation repackaging must retain the validated binary hashes.
+
+No system installation, native compositor/clipboard integration or real Qubes
+transport was exercised. The activity view is not a durable audit log, and
+removing dummy labels does not establish forensic concealment. Dummy remains
+read-only; no root helper or storage-wrapper change was introduced. Physical
+erasure, adversarial filesystem/power-loss behavior, hidden-volume security and
+an independent application audit remain outside this evidence. KDBX writing
+remains experimental upstream. See SECURITY.md and HIDDEN_STORAGE_RESEARCH.md.
+
 ## Alpha10 evidence
 
 Functional source `c98830b` and GUI validation fixes `d528114`/`d22db75` were

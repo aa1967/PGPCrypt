@@ -10,11 +10,11 @@ sudo apt install -y curl ca-certificates
 pgpcrypt_install_dir=$(mktemp -d /tmp/pgpcrypt-install.XXXXXX)
 chmod 755 "$pgpcrypt_install_dir"
 cd "$pgpcrypt_install_dir"
-curl --fail --location --remote-name https://raw.githubusercontent.com/aa1967/PGPCrypt/alpha10-packages/pgpcrypt_0.1.0.alpha10_amd64.deb
-curl --fail --location --remote-name https://raw.githubusercontent.com/aa1967/PGPCrypt/alpha10-packages/SHA256SUMS
+curl --fail --location --remote-name https://raw.githubusercontent.com/aa1967/PGPCrypt/alpha11-packages/pgpcrypt_0.1.0.alpha11_amd64.deb
+curl --fail --location --remote-name https://raw.githubusercontent.com/aa1967/PGPCrypt/alpha11-packages/SHA256SUMS
 sha256sum --check SHA256SUMS
-chmod 644 pgpcrypt_0.1.0.alpha10_amd64.deb
-sudo apt install ./pgpcrypt_0.1.0.alpha10_amd64.deb
+chmod 644 pgpcrypt_0.1.0.alpha11_amd64.deb
+sudo apt install ./pgpcrypt_0.1.0.alpha11_amd64.deb
 pgpcrypt
 )
 ```
@@ -32,7 +32,7 @@ A public APT repository is not required for local `.deb` installation.
 ```sh
 sudo apt update
 sudo apt install -y git ca-certificates
-git clone --branch v0.1.0-alpha10 https://github.com/aa1967/PGPCrypt.git
+git clone --branch v0.1.0-alpha11 https://github.com/aa1967/PGPCrypt.git
 cd PGPCrypt
 ./scripts/install-debian.sh --build
 pgpcrypt
@@ -44,7 +44,7 @@ To build without installing:
 
 ```sh
 ./scripts/build-deb.sh
-python3 scripts/check-deb.py dist/pgpcrypt_0.1.0.alpha10_amd64.deb
+python3 scripts/check-deb.py dist/pgpcrypt_0.1.0.alpha11_amd64.deb
 ```
 
 ## Reproducibility and validation limits
