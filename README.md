@@ -9,6 +9,8 @@ Download and install from the command line. These verified direct downloads
 are available independently of the GitHub release workflow:
 
 ```sh
+(
+set -eu
 sudo apt update
 sudo apt install -y curl ca-certificates
 pgpcrypt_install_dir=$(mktemp -d /tmp/pgpcrypt-install.XXXXXX)
@@ -20,6 +22,7 @@ sha256sum --check SHA256SUMS
 chmod 644 pgpcrypt_0.1.0.alpha9_amd64.deb
 sudo apt install ./pgpcrypt_0.1.0.alpha9_amd64.deb
 pgpcrypt
+)
 ```
 
 Keep Debian security updates enabled. No Rust or compiler installation is needed. You can also launch PGPCrypt from
