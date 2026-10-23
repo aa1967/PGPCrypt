@@ -34,10 +34,10 @@ if [ "$1" = --build ]; then
     $sudo_cmd apt-get install -y -t trixie-backports rustc cargo
     $sudo_cmd apt-get install -y build-essential pkg-config libssl-dev clang libclang-dev \
         qt6-base-dev qt6-wayland python3 binutils dpkg-dev \
-        desktop-file-utils bubblewrap libsodium-dev libzxcvbn-dev age gnupg
+        desktop-file-utils libsodium-dev libzxcvbn-dev age gnupg
     cd "$repo_root"
     ./scripts/build-deb.sh
-    package_version=${PGPCRYPT_PACKAGE_VERSION:-0.1.0~alpha12}
+    package_version=${PGPCRYPT_PACKAGE_VERSION:-0.1.0~alpha13}
     filename_version=$(printf '%s' "$package_version" | tr '~' '.')
     archive="$repo_root/dist/pgpcrypt_${filename_version}_$(dpkg --print-architecture).deb"
 else

@@ -1,33 +1,23 @@
-# Packaged sandbox and memory limits
+# Runtime protections and deferred sandboxing
 
-The Debian launcher requires Bubblewrap and fails closed if user namespaces are
-unavailable. It drops capabilities, isolates IP/abstract-socket networking,
-processes and IPC, and overlays `$HOME/.config`, `.local`, `.cache` and `/tmp`
-with temporary memory-backed filesystems. XDG config/data/state/cache point into
-these overlays. Qt uses widget file dialogs, with portal integration disabled;
-D-Bus addresses and the standard session/system bus sockets are blocked.
-X11/Wayland display access and the Qubes service socket remain available.
+## Current launcher (alpha13 onward)
 
-These measures reduce application-state persistence, not host visibility.
-The host kernel, display server, backups, filesystem metadata, monitoring tools
-and a compromised host can observe paths or plaintext. Other filesystem access
-still runs with the user's permissions. Alternate service sockets and other
-processes are not a comprehensive hostile-desktop sandbox. Existing history
-from previous versions is not removed. No root helper is installed.
+The installed launcher starts PGPCrypt directly as the desktop user. Bubblewrap
+is not installed, invoked, or checked by the application or its CI workflow;
+user namespaces are not required. No alternate sandbox has been enabled.
+Normal XDG directories and D-Bus connections remain available. The launcher
+refuses root and forwards command-line arguments to the desktop supervisor.
 
-Recent vaults are available only during one launcher lifetime, including lock
-restarts; all temporary history disappears when that launcher exits. Vaults and
-converted copies cannot be placed in the temporary directories. Store them in
-a persistent folder such as `~/Documents`. The launcher rejects symlinked XDG
-home directories rather than masking an unintended destination. It launches
-without CLI arguments; source-development binaries do not use this wrapper.
+Qt file dialogs still use widget mode and automatic QSettings file-dialog
+history remains disabled. PGPCrypt's separate recent-vault feature again saves
+up to five paths in its private per-user state file, unless disabled in Vault
+settings. These paths are outside vault encryption; passwords are never saved
+there. Nothing about this change hides paths from the host or erases old traces.
+Desktop lock/suspend signals can reach the existing opt-in handlers when the
+session provides them. Qubes lock still needs the documented dom0 hook and the
+Qubes-request and lock-event settings. No machine policy is changed automatically.
 
-D-Bus desktop lock/suspend signals are unavailable inside this sandbox.
-Inactivity/focus locking and explicit Ctrl+L remain available. Qubes lock needs
-the separate documented dom0 hook; the local Qubes service can still use its
-filesystem Unix socket. This has not established real Qubes transport behavior.
-If Bubblewrap reports that namespaces are disabled, review your Qube/host
-namespace policy; the application does not silently start without isolation.
+## Retained protections
 
 The Rust worker probes `/proc/swaps` at startup, reporting only active/none/
 unknown, never device names. It cannot determine swap encryption. Retained
@@ -37,8 +27,8 @@ page-sharing `munlock` mistakes. Memory-limit/locking failure is visible in
 Vault settings; no extra privileges or unlimited-lock setting is requested.
 The process also disables core dumps and dumpability. **GUI text, OpenPGP key
 packets, KDF allocations and library/request copies are not all memory-locked.**
-Temporary filesystems may themselves swap. Use OS-level encrypted swap or no
-swap when your threat model requires it. This is not a complete memory audit.
+Use OS-level encrypted swap or no swap when your threat model requires it.
+This is not a complete memory audit.
 
 Lock clears the clipboard/primary selection if PGPCrypt still owns the data
 or it matches a digest of the last explicit app copy, regardless of the optional
@@ -60,3 +50,29 @@ paths, credentials, password roles or protection events are recorded. Optional
 session counters include completed actions and failed opens in this GUI launch;
 a failed open can mean a file error, not just a bad password. Other processes,
 offline attacks and prior launches are not tracked. Counters default off.
+
+## Deferred sandbox design
+
+Bubblewrap was removed at the user's request after alpha12 introduced launcher
+and CI complexity. The old implementation is retained in Git history at
+`v0.1.0-alpha12:packaging/pgpcrypt-launcher`; its namespace checks are not part of
+current builds. It masked XDG state and networking but also interrupted recent
+history and desktop D-Bus hooks. This runner could not validate live isolation.
+
+Possible future approaches, not implemented:
+
+| Approach | Useful boundary | Tradeoff to investigate |
+| --- | --- | --- |
+| Qubes vault Qube with no NetVM and named-client qrexec policy | Reuses the user's existing VM isolation and keeps keys in the vault Qube | Requires Qubes policy setup; desktop paths remain visible inside that Qube |
+| Debian AppArmor profile | Restricts application file/network permissions through OS policy | Needs a reviewed profile, distro/kernel support and permission handling for user-chosen vault paths |
+| Optional Flatpak distribution with a narrow permission set | Supplies a maintained desktop sandbox and portal integration | Adds a runtime/distribution path; GUI integration, vault dialogs, D-Bus and Qubes service access need validation |
+
+Before adopting any approach, test installation in Debian 13-min/Qubes, vault
+creation and atomic saves, lock/suspend, clipboard, key import/export, both
+formats, and the Qubes broker. Keep normal installation usable without changing
+kernel namespace policy or installing a root helper. Filesystem metadata and a
+hostile host remain outside what an app sandbox can conceal.
+
+References: [Qubes documentation](https://doc.qubes-os.org/),
+[Debian AppArmor](https://wiki.debian.org/AppArmor), and
+[Flatpak sandbox permissions](https://docs.flatpak.org/en/latest/sandbox-permissions.html).

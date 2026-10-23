@@ -26,8 +26,7 @@ pgpcrypt
 ```
 
 Keep Debian security updates enabled. No Rust or compiler installation is needed. You can also launch PGPCrypt from
-the application menu. The launcher requires Bubblewrap/user namespaces; it exits
-with an error if your host disables them.
+the application menu.
 
 ## Build and install from source
 

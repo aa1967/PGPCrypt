@@ -612,7 +612,6 @@ private:
             if(creatingVault && password->text()!=confirmation->text()) { fail("Passwords/passphrases must match"); return; }
             const auto filename = absoluteVaultPath(path->text());
             if(filename.isEmpty()) { fail("Choose a vault file"); return; }
-            if(ephemeralLocation(filename)) {fail("Choose a persistent vault folder, such as your home or Documents. Sandbox state and /tmp disappear at exit."); return;}
             path->setText(filename); lockedStatus->clear();
             QJsonObject fields{{"path",filename},{"password",password->text()}};
             if(creatingVault) fields.insert("format",formatChoice->currentData().toString());
@@ -645,7 +644,7 @@ private:
             const bool has=recentVaultList->count()>0; recentVaultList->setVisible(has); recentVaultHeading->setVisible(has); forgetRecentButton->setVisible(has);
         }
         if(rememberVaultsCheck) {QSignalBlocker block(rememberVaultsCheck); rememberVaultsCheck->setChecked(recentVaultStore.enabled && recentVaultStore.available); rememberVaultsCheck->setEnabled(recentVaultStore.available);}
-        if(recentStorageHint) recentStorageHint->setText(recentVaultStore.available?(qEnvironmentVariableIsSet("PGPCRYPT_SANDBOX")?"Recent paths are temporary in the sandbox and disappear when PGPCrypt exits. Older history from previous versions may still exist on the host.":"Stores vault paths outside encryption; never passwords. Disable to clear."):"Recent-vault history is unavailable. No new paths will be remembered; an older history file could not be read, cleared or updated.");
+        if(recentStorageHint) recentStorageHint->setText(recentVaultStore.available?"Stores vault paths outside encryption; never passwords. Disable to clear.":"Recent-vault history is unavailable. No new paths will be remembered; an older history file could not be read, cleared or updated.");
     }
 
     void setRememberVaults(bool enabled) {
@@ -653,7 +652,7 @@ private:
         if(!enabled) recentVaultStore.paths.clear();
         if(enabled && unlocked && RecentVaultStore::validPath(activeVaultPath)) {recentVaultStore.paths.removeAll(activeVaultPath); recentVaultStore.paths.prepend(activeVaultPath);}
         const bool saved=recentVaultStore.save(); updateRecentVaultUi();
-        statusBar()->showMessage(saved?(enabled?"Recent vaults will be remembered in this session.":"Recent vault paths cleared; remembering is disabled."):"Could not save the recent-vault setting or clear stored paths. History is disabled for this session.");
+        statusBar()->showMessage(saved?(enabled?"Recent vaults will be remembered on this device.":"Recent vault paths cleared; remembering is disabled."):"Could not save the recent-vault setting or clear stored paths. History is disabled for this session.");
     }
 
     void openRecentVault(QListWidgetItem* item) {
@@ -667,14 +666,6 @@ private:
         if(value.startsWith("~/")) return QDir::cleanPath(QDir::home().filePath(value.mid(2)));
         if(QDir::isRelativePath(value)) return QDir::cleanPath(QDir::home().absoluteFilePath(value));
         return QDir::cleanPath(value);
-    }
-
-    static bool ephemeralLocation(const QString& filename) {
-        if(!qEnvironmentVariableIsSet("PGPCRYPT_SANDBOX")) return false;
-        QFileInfo info(filename); while(!info.exists() && info.absoluteFilePath()!="/") info.setFile(info.absolutePath());
-        const auto resolved=info.canonicalFilePath();
-        for(const auto& candidate:QStringList{QDir::cleanPath(filename),resolved}) for(const auto& root:QStringList{"/tmp",QDir::home().filePath(".config"),QDir::home().filePath(".local"),QDir::home().filePath(".cache")}) if(candidate==root || candidate.startsWith(root+"/")) return true;
-        return false;
     }
 
     void clearVaultCredentials() {
@@ -763,7 +754,6 @@ private:
         connect(browse,&QPushButton::clicked,&dialog,[&] { const auto value=chooseVaultPath(true,QDir::homePath(),format->currentData().toString()); if(!value.isEmpty()) filename->setText(value); });
         connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept); connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject); update();
         if(dialog.exec()!=QDialog::Accepted) { pass->clear(); confirm->clear(); return; }
-        if(ephemeralLocation(absoluteVaultPath(filename->text()))) {fail("Choose a persistent folder outside sandbox state and /tmp for the converted vault."); return;}
         QJsonObject fields{{"path",absoluteVaultPath(filename->text())},{"password",pass->text()},{"format",format->currentData().toString()}};
         pass->clear(); confirm->clear();
         request("convert_copy",fields,[this](bool ok,const QJsonObject&) { if(ok) statusBar()->showMessage("Converted copy saved. Original vault stays open and unchanged."); });
@@ -824,7 +814,7 @@ private:
         auto* title=new QLabel("Vault settings"); title->setStyleSheet("font-size: 20px; font-weight: 600;"); layout->addWidget(title);
         readOnlySettingsNote=new QLabel; readOnlySettingsNote->setWordWrap(true); readOnlySettingsNote->hide(); layout->addWidget(readOnlySettingsNote);
         auto* hint=new QLabel("Themes, locking, clipboard expiry and Qubes requests are saved inside this vault."); hint->setWordWrap(true); layout->addWidget(hint);
-        rememberVaultsCheck=new QCheckBox(qEnvironmentVariableIsSet("PGPCRYPT_SANDBOX")?"Remember recent vaults during this launch":"Remember recent vaults on this device"); layout->addWidget(rememberVaultsCheck);
+        rememberVaultsCheck=new QCheckBox("Remember recent vaults on this device"); layout->addWidget(rememberVaultsCheck);
         recentStorageHint=new QLabel; recentStorageHint->setWordWrap(true); layout->addWidget(recentStorageHint);
         connect(rememberVaultsCheck,&QCheckBox::toggled,this,[this](bool enabled) {setRememberVaults(enabled);}); updateRecentVaultUi();
         auto* panel=buildPreferencesPanel(); layout->addWidget(panel); vaultMutationControls.append(panel);
@@ -1044,7 +1034,7 @@ private:
         connect(enable,&QCheckBox::toggled,minutes,&QWidget::setEnabled); connect(minutes,&QSlider::valueChanged,panel,[=](int value) {minuteLabel->setText(QString::number(value)+" minutes");});
         auto* focus=new QCheckBox("Lock when switching away from PGPCrypt"); form->addRow(focus);
         auto* events=new QCheckBox("Lock on desktop events or an allowed Qubes lock request"); form->addRow(events);
-        auto* eventHint=new QLabel("The packaged sandbox blocks desktop D-Bus: desktop lock/suspend signals are unavailable there. Qubes Lock requests require the documented dom0 hook. Use inactivity locking or Ctrl+L as well."); eventHint->setWordWrap(true); form->addRow(eventHint);
+        auto* eventHint=new QLabel("Desktop lock and suspend signals depend on your session. Qubes Lock requests require the documented dom0 hook and Qubes requests enabled below."); eventHint->setWordWrap(true); form->addRow(eventHint);
         auto* clip=new QCheckBox("Clear copied text after a delay"); form->addRow(clip);
         auto* seconds=new QSlider(Qt::Horizontal); seconds->setRange(5,1800); auto* secondLabel=new QLabel;
         auto* clipRow=new QHBoxLayout; clipRow->addWidget(seconds); clipRow->addWidget(secondLabel); form->addRow("Clipboard delay",clipRow);
@@ -1783,7 +1773,6 @@ private:
     }
 
     bool saveOutputFile(const QString& filename) {
-        if(ephemeralLocation(filename)) {fail("Choose a persistent output folder outside sandbox state and /tmp."); return false;}
         if(!ExternalFilePolicy::allowed(filename,preferences.value("allow_removable_media").toBool())) {fail("Message export to removable media is disabled in Vault settings."); return false;}
         const auto target=QFileInfo(filename).absoluteFilePath();
         const auto vaultPath=activeVaultPath;

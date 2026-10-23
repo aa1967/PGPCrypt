@@ -130,7 +130,8 @@ notes for its selected profile; Load and Save remain available there. All
 appearance/security preferences are inline on the scrollable Vault settings
 page. Ruby light/dark, Hacker green and Cyberpunk themes are available.
 
-The packaged launcher keeps recent paths only for its lifetime, because XDG
-state is temporary. See [SANDBOX.md](SANDBOX.md) for memory, clipboard, mount
-filtering and desktop-event limits. Activity can clear periodically to Ready;
+Starting with alpha13, the launcher runs directly without a sandbox. Recent
+paths persist on this device unless disabled, and desktop lock/suspend hooks
+can receive the session’s signals. See [SANDBOX.md](SANDBOX.md) for retained
+protections and deferred isolation options. Activity can clear periodically to Ready;
 optional launch-only counters do not provide durable login history.
