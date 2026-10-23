@@ -55,23 +55,39 @@ packets inside the encrypted container; take care when copying those packets out
 
 The `Vault notes and settings` entry holds the protected `Notes` field and
 `PGPCrypt.IdleTimeoutSeconds`, plus protected `PGPCrypt.DefaultSigningKey`
-(empty means no default). The settings entry uses `PGPCrypt.Schema=5`; key
+(empty means no default). The settings entry uses `PGPCrypt.Schema=6`; key
 entries remain schema 1. Older settings are read with defaults for missing fields. Protected
 `PGPCrypt.Preferences` holds JSON for themes, locking, clipboard clearing and
 Qubes opt-in; all new automatic behaviors default off.
-Protected `PGPCrypt.Profiles` contains profile IDs, names and key memberships as
-JSON, including username, email, URL and private notes. Each identity also has
-a standard readable entry (`PGPCrypt.Type=identity`, `PGPCrypt.Schema=1`,
-`PGPCrypt.ProfileId`) with Title, UserName, Email, URL and protected Notes.
-Those identity-entry fields are authoritative when edited in KeePassXC;
-protected JSON retains stable IDs and memberships.
+Protected `PGPCrypt.Profiles` contains stable identity IDs and the PGPCrypt
+profile metadata snapshot. Each identity is also a **real child group** of
+`PGPCrypt`, with a stable `PGPCrypt.ProfileId` in group custom data and strict structural
+markers. Its name is the identity name; renaming that group in KeePassXC updates
+the identity when PGPCrypt opens it. The group contains:
 
-Saved text documents are ordinary entries in the PGPCrypt group with
-`PGPCrypt.Type=document`, `PGPCrypt.Schema=1`, Title, protected Notes, and
-`PGPCrypt.DocumentId`, `PGPCrypt.ProfileId`, `PGPCrypt.CreatedAt` and
-`PGPCrypt.UpdatedAt`. Read or copy their Notes in KeePassXC. Existing document
-IDs and structural fields must remain valid. Deleted managed documents are
-removed on save; supported unrelated entries outside the group remain intact.
+- **Identity details**, an ordinary entry with protected UserName, Email, URL
+  and Notes fields. These fields are authoritative for KeePassXC edits.
+- Saved documents with Title and protected Notes. Their stable IDs and timestamps
+  remain in `PGPCrypt.DocumentId`, `PGPCrypt.CreatedAt` and `PGPCrypt.UpdatedAt`.
+  Moving a document between identity groups changes its profile; moving it to
+  the PGPCrypt root makes it unassigned. The physical group is authoritative.
+- **Key <fingerprint>** reference entries pointing to canonical key entries in
+  the PGPCrypt root. They include the fingerprint, canonical entry UUID and
+  recovery instructions, **not duplicate armored keys**. One key can appear in
+  several identity groups without stale copies of its secret material. Removing
+  a reference removes that identity membership, not the canonical key. Read or
+  copy the armor from the canonical entry's Advanced fields.
+
+Unassigned saved documents remain in the PGPCrypt root. Older supported settings
+schemas 1–5 remain readable and migrate on save; managed entry IDs, supported
+custom fields and history survive moves. Structural group/entry markers, IDs and
+reference targets must remain coherent. Unsupported new groups, misplaced
+identity entries, duplicate IDs or forged references are refused. PGPCrypt does
+not silently adopt manually created unmarked groups as new profiles.
+
+Deleted managed documents, identity groups and references are removed during
+PGPCrypt saves; supported unrelated entries outside the PGPCrypt group remain
+intact. The app does not turn arbitrary KeePass hierarchies into profiles.
 Older PGPCrypt versions reject the new settings schema; KeePassXC can still
 open the standard database. Structural markers and fingerprints must agree;
 duplicate settings, duplicate fingerprints and unknown entries inside this
@@ -100,8 +116,13 @@ using the original; lock and open the destination to switch.
 
 Conversion copies saved PGPCrypt keys (including encrypted private packets),
 revocations, retained notes, idle timeout, default signing key, preferences,
-profiles and saved documents. Optional protection records and triggers are configured separately for each
-destination and are not copied. Unrelated KeePass entries, history and other
+profiles and saved documents. In **both directions, age v1 → KDBX 4.1 and
+KDBX 4.1 → age v1**, the destination does not receive the source
+`.pgpcrypt-protection`, `.pgpcrypt-dummy`, `.pgpcrypt-emergency` or
+`.pgpcrypt-expiry` records. Those per-vault PGPCrypt records hold the advanced
+protection settings outside both standard containers. Configure any desired
+options separately after normally unlocking the new copy. Ordinary encrypted
+preferences, such as themes and Notepad layout, are copied. Unrelated KeePass entries, history and other
 KeePass-only information are not part of an age vault and stay in the source.
 Keep the source until you have opened and checked the destination. Conversion
 is not secure deletion of the original or any backup.

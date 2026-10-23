@@ -41,7 +41,13 @@ pub struct Preferences {
     pub theme: String,
     #[serde(default)]
     pub qubes_rpc: bool,
+    #[serde(default = "default_notepad_popout")]
+    pub notepad_popout: bool,
 }
+fn default_notepad_popout() -> bool {
+    true
+}
+
 fn default_theme() -> String {
     "light".into()
 }
@@ -54,6 +60,7 @@ impl Default for Preferences {
             clipboard_clear_seconds: 0,
             theme: "light".into(),
             qubes_rpc: false,
+            notepad_popout: true,
         }
     }
 }
@@ -313,6 +320,10 @@ impl VaultData {
             .iter()
             .map(|bytes| crate::pgp::parse(bytes).map(|c| c.fingerprint().to_hex()))
             .collect::<Result<HashSet<_>>>()?;
+        ensure!(
+            fingerprints.len() == self.certificates.len(),
+            "Duplicate certificate fingerprints"
+        );
         let mut ids = HashSet::new();
         let mut names = HashSet::new();
         for profile in &self.profiles {
@@ -632,7 +643,7 @@ impl Vault {
         // No decoded data is exposed until the complete age stream authenticates.
         let stored: Stored = serde_json::from_slice(&plaintext).context("Invalid vault schema")?;
         ensure!(
-            stored.application == "PGPCrypt" && matches!(stored.schema, 1..=6),
+            stored.application == "PGPCrypt" && matches!(stored.schema, 1..=7),
             "Unsupported vault schema"
         );
         ensure!(
@@ -858,7 +869,7 @@ impl Vault {
         }
         let mut plaintext = Zeroizing::new(serde_json::to_vec(&StoredRef {
             application: "PGPCrypt",
-            schema: 6,
+            schema: 7,
             data: &self.data,
         })?);
         let size = plaintext.len().div_ceil(PAD) * PAD;
@@ -981,6 +992,39 @@ mod tests {
         appended.push(0);
         fs::write(&path, appended)?;
         assert!(Vault::open(&path, PASS).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_public_copy_cannot_replace_private_material_during_conversion() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let source = dir.path().join("private-source.age");
+        let destination = dir.path().join("must-not-create.kdbx");
+        let cert = crate::pgp::generate("Duplicate-key integrity fixture")?;
+        let public = crate::pgp::parse(crate::pgp::public_armor(&cert)?.as_bytes())?;
+        let mut vault = Vault::create(&source, PASS)?;
+        vault
+            .data
+            .certificates
+            .push(crate::pgp::encode(&cert)?.to_vec());
+        vault.save()?;
+        let original = fs::read(&source)?;
+        vault
+            .data
+            .certificates
+            .push(crate::pgp::encode(&public)?.to_vec());
+        assert!(vault.save().is_err());
+        assert!(
+            vault
+                .convert_copy(&destination, PASS, VaultFormat::Kdbx)
+                .is_err()
+        );
+        assert!(!destination.exists());
+        assert_eq!(fs::read(&source)?, original);
+        drop(vault);
+        let reopened = Vault::open(&source, PASS)?;
+        assert_eq!(reopened.data.certificates.len(), 1);
+        assert!(crate::pgp::parse(&reopened.data.certificates[0])?.is_tsk());
         Ok(())
     }
 

@@ -87,7 +87,9 @@ def main():
         plaintext = directory / "fixture.json"
         external = directory / "go.pgpcrypt.age"
         peer = Peer()
-        peer.request("create", path=str(original), password=PASS)
+        created = peer.request("create", path=str(original), password=PASS)
+        assert created["preferences"]["notepad_popout"] is True
+        peer.request("settings_set", preferences={"notepad_popout": False})
         peer.request("generate", password="disposable age key passphrase", key_options={
             "name": "Age interop fixture", "email": "age@example.invalid",
             "algorithm": "cv25519", "layout": "subkeys", "signing": True,
@@ -105,8 +107,9 @@ def main():
 
         terminal_command([age, "--decrypt", "--output", str(plaintext), str(original)])
         decoded = json.loads(plaintext.read_text())
-        assert decoded["application"] == "PGPCrypt" and decoded["schema"] == 6
+        assert decoded["application"] == "PGPCrypt" and decoded["schema"] == 7
         assert decoded["data"]["notes"] == "independent age compatibility fixture"
+        assert decoded["data"]["preferences"]["notepad_popout"] is False
         assert len(decoded["data"]["certificates"]) == 1
         assert decoded["data"]["profiles"][0]["id"] == profile
         assert decoded["data"]["profiles"][0]["username"] == "private pseudonym"
@@ -131,20 +134,22 @@ def main():
 
         terminal_command([age, "--passphrase", "--output", str(external), str(plaintext)])
         peer = Peer()
-        peer.request("open", path=str(external), password=PASS)
+        reopened = peer.request("open", path=str(external), password=PASS)
+        assert reopened["preferences"]["notepad_popout"] is False
         assert peer.request("notes_get")["text"] == decoded["data"]["notes"]
         assert peer.request("list")["keys"][0]["fingerprint"] == fingerprint
         assert peer.request("document_get", document_id=document, profile_id=profile)["text"] == "Stored inside the age vault"
         peer.lock()
         # Recreate the previous age schemas using the independent writer.
-        for schema in (5, 4, 3, 2, 1):
+        for schema in (6, 5, 4, 3, 2, 1):
             previous_data = copy.deepcopy(decoded)
             previous_data["schema"] = schema
+            previous_data["data"]["preferences"].pop("notepad_popout", None)
             if schema == 5:
                 for identity in previous_data["data"]["profiles"]:
                     for field in ("username", "email", "url", "notes"):
                         identity.pop(field, None)
-            else:
+            elif schema < 5:
                 previous_data["data"].pop("profiles", None)
                 previous_data["data"].pop("documents", None)
             if schema < 4:
@@ -161,17 +166,24 @@ def main():
             settings = peer.request("open", path=str(previous), password=PASS)
             assert settings["default_signing_key"] == ""
             assert settings["preferences"]["auto_lock"] is False
+            assert settings["preferences"]["notepad_popout"] is True
             assert peer.request("list")["keys"][0]["fingerprint"] == fingerprint
-            if schema == 5:
+            if schema >= 5:
                 restored = peer.request("profiles_list")["profiles"][0]
                 assert restored["id"] == profile and restored["fingerprints"] == [fingerprint]
-                assert all(restored[field] == "" for field in ("username", "email", "url", "notes"))
+                if schema == 5:
+                    assert all(restored[field] == "" for field in ("username", "email", "url", "notes"))
+                else:
+                    assert restored["username"] == "private pseudonym"
+                    assert restored["email"] == "portable@example.invalid"
+                    assert restored["url"] == "https://example.invalid/identity"
+                    assert restored["notes"] == "Private identity notes"
                 assert peer.request("document_get", document_id=document)["text"] == "Stored inside the age vault"
             else:
                 assert peer.request("profiles_list")["profiles"] == []
                 assert peer.request("documents_list")["documents"] == []
             peer.lock()
-    print("age interoperability passed: Rust vault -> Debian age -> Rust vault; profiles/documents and schemas 1/2/3/4/5/6")
+    print("age interoperability passed: Rust vault -> Debian age -> Rust vault; profiles/documents and schemas 1/2/3/4/5/6/7")
 
 
 if __name__ == "__main__":

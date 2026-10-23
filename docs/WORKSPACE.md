@@ -10,8 +10,11 @@ optional protection companion records described separately.
 **All** shows every key and saved document. The **+** tab creates a named profile.
 Profiles are categories: one key can belong to several, and a profile can be empty.
 Newly generated or imported keys join the selected profile automatically.
+The Identities overview lists every identity with key and document counts.
+Selecting a row shows editable details alongside it and associated keys below.
 Use **Identities** to edit name, username, email, website and private notes,
-or change key membership. Creating an identity starts with those fields.
+or change key membership. Creating an identity starts with those fields and
+includes a compact table for optionally assigning existing keys.
 Selecting an identity groups its associated keys first; column sorting applies
 within the associated and other-key groups. Search and status filters narrow
 the table. All key tables share identity, fingerprint, material, status,
@@ -70,10 +73,13 @@ full fingerprint over a trusted channel.
 
 ## Portable recovery
 
-age schema 6 stores `data.profiles` and `data.documents`. KDBX settings schema 5
-stores profiles in protected `PGPCrypt.Profiles` JSON and ordinary identity
-entries. Identity fields map to Title, UserName, Email, URL and Notes for direct
-reading/editing in KeePassXC. Each saved document is a
+age schema 7 stores `data.profiles` and `data.documents`. KDBX settings schema 6
+stores profiles in protected `PGPCrypt.Profiles` JSON and actual identity
+groups. Each group contains an Identity details entry, its documents and
+references to canonical keys. Identity fields map to ordinary UserName, Email,
+URL and Notes for direct reading/editing in KeePassXC; the group name is the
+identity name. Overlapping memberships reference one canonical key instead of
+storing multiple copies of its secret packets. Each saved document is a
 normal KeePass entry with its title and protected `Notes` content. It can be read
 and copied in KeePassXC without PGPCrypt. Both conversion directions preserve
 profiles, membership and saved documents. Older PGPCrypt versions reject the new
@@ -92,3 +98,26 @@ under the per-user state directory. A filename/path may itself reveal an identit
 or project name. Disabling removes the current record's paths, not filesystem
 snapshots/backups of that record. Qt's automatic file-dialog history remains
 disabled; this is a separate PGPCrypt feature.
+
+## Notepad windows and activity
+
+Notepad opens in a separate window by default. Disable **Pop out Notepad** in
+Vault settings to keep it embedded. Both layouts use the same editor, controls,
+profile selection and worker session. Moving between layouts does not copy
+unsaved text or create another file writer. Main-window key/profile edits
+refresh those same controls. Lock closes session windows and discards unsaved
+text and the activity view.
+
+The terminal-style activity panel is an in-memory view of fixed application
+events with severity filters and colors. It does not invoke journalctl, write
+a log file or record paths, names, fingerprints, document contents, credentials,
+raw worker errors, Qubes peers or advanced-protection configuration/outcomes.
+Entries are bounded and cleared at lock. The panel is a troubleshooting aid,
+not an audit trail or proof of what happened on storage.
+
+Right-click key rows for public-key/fingerprint/value copying and the existing
+key-management actions. Private-key display still uses verified authentication.
+Verification also opens a PASS/FAIL result with aligned verified-signer and
+stored-certificate fields; matching a stored key does not establish its owner's
+real-world identity. Failed verification returns no authenticated message text
+or trusted signer metadata and clears the previous result.

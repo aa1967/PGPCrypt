@@ -9,6 +9,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import xml.etree.ElementTree as ET
 
 from age_interop import Peer, ROOT
 
@@ -50,14 +51,45 @@ def main():
                                profile_username="private pseudonym", profile_email="portable@example.invalid",
                                profile_url="https://example.invalid/identity", profile_notes="Private identity notes",
                                profile_fingerprints=[fingerprint])["id"]
+        work_profile = peer.request("profile_save", profile_name="Work",
+                                    profile_fingerprints=[fingerprint])["id"]
         document = peer.request("document_save", profile_id=profile, title="Saved message",
                                 text="message saved inside the vault")["id"]
         peer.request("notes_set", text="notes created by PGPCrypt")
         peer.request("settings_set", idle_timeout_seconds=120)
         peer.lock()
         key_entry = "PGPCrypt/KDBX interop fixture"
-        document_entry = "PGPCrypt/Saved message"
-        identity_entry = "PGPCrypt/Personal"
+        document_entry = "PGPCrypt/Personal/Saved message"
+        identity_entry = "PGPCrypt/Personal/Identity details"
+        # KeePassXC exports independently decoded XML. Both identities should be
+        # real groups, with references to one canonical armored key rather than
+        # duplicate secret material which could diverge after a password change.
+        exported = ET.fromstring(run("export", "-q", str(path)))
+        groups = [group for group in exported.iter("Group")
+                  if group.findtext("Name") == "PGPCrypt"]
+        assert len(groups) == 1
+        managed = groups[0]
+        identity_groups = {group.findtext("Name"): group for group in managed.findall("Group")}
+        assert set(identity_groups) == {"Personal", "Work"}
+
+        def fields(entry):
+            return {field.findtext("Key"): field.findtext("Value", default="")
+                    for field in entry.findall("String")}
+
+        references = []
+        for name, group in identity_groups.items():
+            entries = [fields(entry) for entry in group.findall("Entry")]
+            assert any(entry.get("Title") == "Identity details" for entry in entries), name
+            refs = [entry for entry in entries if entry.get("PGPCrypt.Type") == "key_reference"]
+            assert len(refs) == 1 and refs[0]["OpenPGP.Fingerprint"] == fingerprint
+            assert refs[0]["PGPCrypt.KeyEntry"]
+            assert all(attribute not in refs[0] for attribute in
+                       ("OpenPGP.PublicKey", "OpenPGP.PrivateKey", "OpenPGP.Revocation"))
+            references.extend(refs)
+        assert len({entry["PGPCrypt.KeyEntry"] for entry in references}) == 1
+        armored = [fields(entry) for entry in managed.iter("Entry")
+                   if "OpenPGP.PrivateKey" in fields(entry)]
+        assert len(armored) == 1 and armored[0]["OpenPGP.PrivateKey"].strip() == private.strip()
         for attribute, expected in [("UserName", "private pseudonym"),
                                     ("Email", "portable@example.invalid"),
                                     ("URL", "https://example.invalid/identity"),
@@ -80,13 +112,24 @@ def main():
         run("edit", "-q", "--notes", "edited in KeePassXC", str(path),
             "PGPCrypt/Vault notes and settings")
         run("add", "-q", "--username", "unrelated fixture", str(path), "External entry")
+        # Ordinary KeePassXC group operations are meaningful organizational
+        # edits: moving a document changes its identity; removing a reference
+        # unassigns just that identity without deleting the canonical key.
+        run("mv", "-q", str(path), document_entry, "PGPCrypt/Work")
+        document_entry = "PGPCrypt/Work/Saved message"
+        run("rm", "-q", str(path), "PGPCrypt/Personal/Key " + fingerprint)
         peer = Peer()
         peer.request("open", path=str(path), password=PASS)
         assert peer.request("notes_get")["text"] == "edited in KeePassXC"
         assert peer.request("list")["keys"][0]["fingerprint"] == fingerprint
-        assert peer.request("document_get", document_id=document)["text"] == "message edited in KeePassXC"
-        identity = peer.request("profiles_list")["profiles"][0]
-        assert identity["fingerprints"] == [fingerprint]
+        moved = peer.request("document_get", document_id=document)
+        assert moved["text"] == "message edited in KeePassXC"
+        assert moved["profile_id"] == work_profile
+        identities = peer.request("profiles_list")["profiles"]
+        identity = next(item for item in identities if item["id"] == profile)
+        work_identity = next(item for item in identities if item["id"] == work_profile)
+        assert identity["fingerprints"] == []
+        assert work_identity["fingerprints"] == [fingerprint]
         assert identity["username"] == "updated portable pseudonym"
         assert identity["email"] == "portable@example.invalid"
         assert identity["url"] == "https://example.invalid/updated"
@@ -122,10 +165,12 @@ def main():
         assert peer.request("protected_private_export", fingerprint=fingerprint, password=KEYPASS)["text"] == private
         assert peer.request("revocation_export", fingerprint=fingerprint)["text"] == ticket
         assert peer.request("document_get", document_id=document)["text"] == "message edited in KeePassXC"
-        assert peer.request("document_get", document_id=document)["profile_id"] == profile
-        assert peer.request("profiles_list")["profiles"][0] == identity
+        assert peer.request("document_get", document_id=document)["profile_id"] == work_profile
+        restored = peer.request("profiles_list")["profiles"]
+        assert next(item for item in restored if item["id"] == profile) == identity
+        assert next(item for item in restored if item["id"] == work_profile) == work_identity
         peer.lock()
-    print("KDBX interoperability passed: protected keys/documents/identity fields, KeePassXC edits, stale-write refusal, unrelated entries, age conversion")
+    print("KDBX interoperability passed: protected keys/documents/identity groups and references, KeePassXC field/group edits, stale-write refusal, unrelated entries, age conversion")
 
 
 if __name__ == "__main__":

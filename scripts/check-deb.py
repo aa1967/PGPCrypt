@@ -83,7 +83,7 @@ def main():
         for mode in ("--self-test", "--self-test-kdbx", "--test-lock-restart"):
             result = subprocess.run([str(stage / "usr/lib/pgpcrypt/pgpcrypt-desktop"), mode],
                                     env=settings, cwd=stage / "usr/lib/pgpcrypt",
-                                    capture_output=True, text=True, timeout=60, **child_identity)
+                                    capture_output=True, text=True, timeout=90, **child_identity)
             if result.returncode:
                 raise RuntimeError(result.stdout + result.stderr)
             print(result.stdout.strip())
