@@ -1,5 +1,32 @@
 # Validation history
 
+## Alpha13 evidence
+
+Source `228e8ff` was pushed to the existing PR #10 before functional checks.
+Bubblewrap invocation, namespace checks and the Bubblewrap package/build
+requirement have been removed. The desktop compiles with warnings as errors.
+
+Post-push package checks passed direct startup through the packaged launcher
+(relocated only to the unpacked fixture), both age and KDBX Qt workflows,
+key/message/document operations, clipboard cleanup and supervisor process
+replacement on lock. Checks also passed runtime dependencies with no Bubblewrap,
+ELF RPATH/ownership/modes, sources/licenses, Qubes handlers and writable-location
+permission guidance. Shell syntax checks passed. No system installation was run.
+
+The worker, migration utility and Qubes adapter binaries are byte-identical to
+the validated alpha12 binaries. No crypto/storage-format or worker source changed;
+alpha12's 75 Rust and independent interoperability results remain the baseline
+for those components. They were not rerun locally for this launcher/UI removal.
+The GitHub workflow still runs its complete source, interoperability and package
+checks on the PR and release tag; see its run for the current remote result.
+
+Only the desktop launcher/UI and packaging behavior changed. Recent-vault state
+can persist again and existing opt-in desktop D-Bus handlers are no longer
+blocked by the wrapper. Native lock/suspend delivery, real Qubes/USB hardware
+and an independent audit remain unvalidated. Sandboxing is deferred, with
+alternatives documented in SANDBOX.md. Final documentation repackaging must
+retain the validated binary and launcher hashes.
+
 ## Alpha12 evidence
 
 Source `5a874d3`, namespace-check correction `75dea4b`, and launcher/policy

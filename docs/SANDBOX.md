@@ -2,9 +2,10 @@
 
 ## Current launcher (alpha13 onward)
 
-The installed launcher starts PGPCrypt directly as the desktop user. Bubblewrap
-is not installed, invoked, or checked by the application or its CI workflow;
-user namespaces are not required. No alternate sandbox has been enabled.
+The installed launcher starts PGPCrypt directly as the desktop user. The
+package/build installer no longer requests Bubblewrap, and neither the app nor
+CI invokes it; user namespaces are not required. Upgrading does not uninstall
+a Bubblewrap package that was already present. No alternate sandbox has been enabled.
 Normal XDG directories and D-Bus connections remain available. The launcher
 refuses root and forwards command-line arguments to the desktop supervisor.
 
@@ -65,7 +66,7 @@ Possible future approaches, not implemented:
 | --- | --- | --- |
 | Qubes vault Qube with no NetVM and named-client qrexec policy | Reuses the user's existing VM isolation and keeps keys in the vault Qube | Requires Qubes policy setup; desktop paths remain visible inside that Qube |
 | Debian AppArmor profile | Restricts application file/network permissions through OS policy | Needs a reviewed profile, distro/kernel support and permission handling for user-chosen vault paths |
-| Optional Flatpak distribution with a narrow permission set | Supplies a maintained desktop sandbox and portal integration | Adds a runtime/distribution path; GUI integration, vault dialogs, D-Bus and Qubes service access need validation |
+| Optional Flatpak distribution with a narrow permission set | Supplies a maintained desktop sandbox and portal integration | Uses Bubblewrap internally, so it is a managed packaging option rather than a Bubblewrap-free replacement; adds a runtime and needs GUI/Qubes integration review |
 
 Before adopting any approach, test installation in Debian 13-min/Qubes, vault
 creation and atomic saves, lock/suspend, clipboard, key import/export, both
