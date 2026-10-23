@@ -87,14 +87,17 @@ Path(os.environ['PROBE_RESULT']).write_text('isolated')
             child = {'user': user.pw_uid, 'group': user.pw_gid, 'extra_groups': []}
         realenv = dict(os.environ, HOME=str(home), HOST_NET=net, PROBE_RESULT=str(root/'isolation-result'))
         realenv.pop('XAUTHORITY', None)
-        result = subprocess.run([str(real)], env=realenv, capture_output=True, text=True, **child)
-        if result.returncode:
-            # Container runners often prohibit namespaces. Do not claim this
-            # validates isolation; production still fails closed on that host.
-            if any(word in result.stderr for word in ('Operation not permitted','No permissions','namespace','Permission denied')):
-                print('Real sandbox unavailable on this runner: '+result.stderr.strip())
+        capability = subprocess.run([bwrap, '--unshare-user', '--unshare-net', '--ro-bind', '/', '/', '--', '/bin/true'], env=realenv, capture_output=True, text=True, **child)
+        if capability.returncode:
+            # Probe namespace support independently: do not misclassify bugs in
+            # the actual launcher or display mounts as runner limitations.
+            reasons=('Operation not permitted','No permissions to create new namespace','setting up uid map: Read-only file system','Permission denied')
+            if any(reason in capability.stderr for reason in reasons):
+                print('Real sandbox unavailable on this runner: '+capability.stderr.strip())
                 return
-            raise AssertionError(result.stderr)
+            raise AssertionError(capability.stderr)
+        result = subprocess.run([str(real)], env=realenv, capture_output=True, text=True, **child)
+        assert result.returncode == 0, result.stderr
         assert (root/'isolation-result').read_text() == 'isolated'
         for name in ('.config', '.local', '.cache'):
             assert (home/name/'host-sentinel').read_text() == 'original'
