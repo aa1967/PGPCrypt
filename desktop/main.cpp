@@ -1205,8 +1205,8 @@ private:
     }
 
     void installCopyMenu(QTableWidget* table) {
-        table->setContextMenuPolicy(Qt::CustomContextMenu); connect(table,&QWidget::customContextMenuRequested,this,[table](const QPoint& point) {
-            const auto index=table->indexAt(point); if(!index.isValid()) return; table->selectRow(index.row()); QMenu menu; auto* value=menu.addAction("Copy value"); auto* row=menu.addAction("Copy row"); const auto selected=menu.exec(table->viewport()->mapToGlobal(point)); if(selected==value) qApp->clipboard()->setText(table->item(index.row(),index.column())->text()); else if(selected==row) qApp->clipboard()->setText(tableRowText(table,index.row()));
+        table->setContextMenuPolicy(Qt::CustomContextMenu); connect(table,&QWidget::customContextMenuRequested,this,[this,table](const QPoint& point) {
+            const auto index=table->indexAt(point); if(!index.isValid()) return; table->selectRow(index.row()); const auto copiedValue=table->item(index.row(),index.column())->text(); const auto copiedRow=tableRowText(table,index.row()); QMenu menu; auto* value=menu.addAction("Copy value"); auto* row=menu.addAction("Copy row"); const auto selected=menu.exec(table->viewport()->mapToGlobal(point)); if(ending || !unlocked) return; if(selected==value) qApp->clipboard()->setText(copiedValue); else if(selected==row) qApp->clipboard()->setText(copiedRow);
         });
     }
 
@@ -1228,7 +1228,7 @@ private:
 
     void installKeyMenu(QTableWidget* table,bool actions=true) {
         table->setContextMenuPolicy(Qt::CustomContextMenu); connect(table,&QWidget::customContextMenuRequested,this,[this,table,actions](const QPoint& point) {
-            const auto index=table->indexAt(point); if(!index.isValid()) return; table->selectRow(index.row()); const auto fp=table->item(index.row(),2)->text(); const auto key=keyRecord(fp);
+            const auto index=table->indexAt(point); if(!index.isValid()) return; table->selectRow(index.row()); const auto fp=table->item(index.row(),2)->text(); const auto key=keyRecord(fp); const auto copiedValue=table->item(index.row(),index.column())->text(); const auto copiedRow=tableRowText(table,index.row());
             QMenu menu; auto* value=menu.addAction("Copy value"); auto* fingerprint=menu.addAction("Copy fingerprint"); auto* row=menu.addAction("Copy row"); auto* publicKey=actions?menu.addAction("Copy public key"):nullptr; if(publicKey) publicKey->setEnabled(!pending);
             QAction *makeDefault=nullptr,*clearDefault=nullptr,*subkeys=nullptr,*password=nullptr,*privateKey=nullptr,*revocation=nullptr;
             if(actions) {
@@ -1239,8 +1239,8 @@ private:
                 privateKey=menu.addAction("Show private key…"); privateKey->setEnabled(!pending && key.value("has_secret").toBool());
                 revocation=menu.addAction("Show revocation certificate…"); revocation->setEnabled(!pending && key.value("has_secret").toBool());
             }
-            const auto selected=menu.exec(table->viewport()->mapToGlobal(point)); if(!selected) return;
-            if(selected==value) qApp->clipboard()->setText(table->item(index.row(),index.column())->text()); else if(selected==fingerprint) qApp->clipboard()->setText(fp); else if(selected==row) qApp->clipboard()->setText(tableRowText(table,index.row()));
+            const auto selected=menu.exec(table->viewport()->mapToGlobal(point)); if(!selected || ending || !unlocked) return;
+            if(selected==value) qApp->clipboard()->setText(copiedValue); else if(selected==fingerprint) qApp->clipboard()->setText(fp); else if(selected==row) qApp->clipboard()->setText(copiedRow);
             else if(!pending && selected==publicKey) copyPublicKey(fp); else if(!pending && selected==makeDefault) saveDefaultKey(fp); else if(!pending && selected==clearDefault) saveDefaultKey({}); else if(!pending && selected==subkeys) subkeysDialog(fp); else if(!pending && selected==password) protectKeyDialog(fp); else if(!pending && selected==privateKey) confirmPrivateExport(fp);
             else if(!pending && selected==revocation && QMessageBox::question(this,"Revocation certificate","Anyone with this certificate can revoke your key. Keep it private until revoking.",QMessageBox::Yes|QMessageBox::Cancel,QMessageBox::Cancel)==QMessageBox::Yes) exportKey("revocation_export",fp);
         });
