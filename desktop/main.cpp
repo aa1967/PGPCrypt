@@ -394,7 +394,7 @@ private:
     void fail(const QString& message) {
         statusBar()->showMessage(message);
         lockedStatus->setText(message);
-        if (testing) { std::fputs("Qt desktop self-test FAILED\n", stderr); ending = true; process.kill(); process.waitForFinished(5000); qApp->exit(1); }
+        if (testing) { std::fprintf(stderr,"Qt desktop self-test FAILED: %s\n",message.toUtf8().constData()); ending = true; process.kill(); process.waitForFinished(5000); qApp->exit(1); }
     }
 
     void request(const QString& operation, QJsonObject fields, Reply callback) {
@@ -437,7 +437,7 @@ private:
         const bool ok = response.value("ok").toBool();
         const auto code=response.value("code").toString();
         if(!ok && code=="vault_reopen_required") {
-            const QString message="The vault was saved, but a storage update failed. Reopen it and check emergency protection in Settings. Keep a backup before shutting down.";
+            const QString message="The vault was saved, but a storage update failed. Reopen it and check protection in Vault settings. Keep a backup before shutting down.";
             if(testing) {fail(message); return;}
             endSession(true,message); return;
         }
