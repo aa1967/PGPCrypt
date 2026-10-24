@@ -10,6 +10,7 @@ pub mod protection;
 pub mod qubes;
 pub mod vault;
 pub mod worker;
+pub mod workflows;
 
 /// Must run before accepting secrets. Prevent ordinary Linux core dumps.
 pub fn harden_process() -> anyhow::Result<()> {

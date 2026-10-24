@@ -1,50 +1,55 @@
-# Settings
+# Vault settings
 
-Unlock a vault, then select the **Settings** navigation button or **Settings → Preferences**. Per-vault preferences stay inside its
-age/KDBX encryption and are copied during conversion. They apply after unlock;
-the locked landing screen uses the default light theme.
+Unlock a vault and select **Vault settings**. Appearance, session security,
+conversion and advanced protections are all on this scrollable page. Preferences
+stay inside vault encryption and survive age/KDBX conversion. The locked landing
+screen uses the default light theme.
 
-- **Automatic inactivity locking**: off by default, including older vaults that
-  have not opted in. Enable it and use the slider from 1 to 60 minutes.
-- **Lock on focus loss**: off by default. You can switch to a password manager
-  without an immediate lock. It is independent of inactivity locking.
-- **Lock on desktop lock / suspend / Qubes host-lock requests**: off by default.
-  Guest signals and a configured Qubes lock service can request lock when enabled.
-- **Clear text copied from PGPCrypt**: off by default. Its slider runs from 5
-  seconds to 30 minutes. Clipboard/primary-selection changes restart or cancel
-  their respective timer. A timer only clears content still owned by PGPCrypt;
-  a later copy from another application is left alone. When enabled, manual
-  lock also clears owned clipboard content because the UI process then exits.
-  Clipboard managers, other qubes and operating-system history may retain copies.
-- **Remember recent vaults on this device**: on by default. Stores up to five
-  paths outside vault encryption for one-click access to the password screen.
-  Disabling clears the paths and stops recording them; no passwords are saved.
-  This preference is per-device, separate from encrypted per-vault settings.
-- **Theme**: Light, Warm light, Dark, Nord, Solarized light or Solarized dark,
-  saved per vault and applied after unlock. The older Solarized setting keeps
-  its dark appearance.
-- **Requests from other Qubes**: off by default. Lets an unlocked vault receive
-  signing/decryption requests, with local approval for each request. A separate
-  named-client policy in dom0 is required. Decrypted text goes back to the
-  approved qube. Enabling this setting does not create that policy. See
-  [Qubes setup](QUBES.md).
+- **Inactivity lock**: off by default; enable for 1–60 minutes. Focus-loss and
+  desktop/suspend/Qubes lock-event options are independent and also default off.
+- **Clipboard timer**: off by default; enable for 5 seconds–30 minutes. It clears
+  only app-owned or matching copied text. Lock clears such clipboard/primary
+  content even when the timer is off. Clipboard managers, Qubes transfers and
+  OS history may retain copies.
+- **Remember recent vaults on this device**: on by default, per device. Stores up
+  to five paths outside encryption, never passwords. Disabling clears the record
+  and stops recording paths. Qt automatic file-dialog history stays disabled.
+- **Theme**: Light, Warm light, Dark, Nord, Solarized light/dark, Ruby light/dark,
+  Hacker green or Cyberpunk. Applied after unlock.
+- **Open Notepad in its own window**: off by default. Both layouts share the same
+  widgets, worker and editor state, with no second database writer.
+- **Activity clearing**: off by default; an optional 5-second–60-minute timer
+  resets entries to Ready. Clear does the same immediately. Inventory and optional
+  counters remain. Activity is never written to a log file.
+- **Window counters**: off by default. After unlock, shows uptime, completed
+  actions and failed opens before that unlock. Lock, closing/restarting the app
+  or reboot resets them. Failures include file errors; other app processes and
+  previous sessions are invisible. Inventory counts are always displayed.
+- **Welcome block**: optional plain text/ASCII art in the activity header, up to
+  16 lines / 2048 UTF-8 bytes. No terminal commands are executed.
+- **Removable message files**: off by default. Restricts message import/export
+  in the app, not system mounting or vault selection. See [SANDBOX.md](SANDBOX.md).
+- **Requests from other Qubes**: off by default. An unlocked vault can approve
+  signing/decryption requests individually. Separate named-client dom0 policy is
+  required; the setting does not create it. See [QUBES.md](QUBES.md).
 
-**Settings → Save converted vault copy…** writes a separate encrypted destination
-with a confirmed password and preserves the original. The Preferences dialog
-also links to conversion. Conversion and timeout controls no longer occupy the
-main workspace.
+**Save converted copy…** creates a separate encrypted age v1 or KDBX 4.1 file,
+preserving the source. In both directions, advanced-protection companion records
+are not copied; configure those separately in the destination. Other preferences,
+workflows, keys, identities and saved documents are preserved. See
+[KDBX_COMPATIBILITY.md](KDBX_COMPATIBILITY.md).
 
-The four pages are Keys, Notepad, Identities and Settings. Profiles and saved
-Notepad documents are described in [WORKSPACE.md](WORKSPACE.md). The **Password and vault protection** section has a master control and warning
-before the individual emergency password, dummy password and inactivity-deletion
-options can be enabled. All start off. See [the exact behavior and limits](VAULT_PROTECTION.md). The removed encrypted-notes page stored
-its text under the vault password, not an OpenPGP recipient key. Existing notes
-are preserved during saves and conversion. To recover older notes, reveal the
-`Notes` field on the KDBX `Vault notes and settings` entry in KeePassXC, or recover
-`data.notes` from the age JSON using `age --decrypt` in a private environment.
-The application does not erase or migrate them into ordinary plaintext files.
+**Password and vault protection** has a master switch, an explicit warning and
+individual emergency/dummy/inactivity-deletion controls. All default off. Details
+and limitations are in [VAULT_PROTECTION.md](VAULT_PROTECTION.md). These settings
+and their outcomes are excluded from session activity.
 
-Notepad prompts for a private-key password only when a matching signing or
-decryption secret needs it. Empty/unprotected keys proceed without a prompt.
-Passwords are not cached between operations. A wrong password can be retried or
-cancelled without putting plaintext into the result editor.
+The older encrypted-notes field is preserved during saves/conversion. Recover
+its protected Notes in KeePassXC's `Vault notes and settings` entry, or `data.notes`
+in authenticated age JSON. It is not exported to an ordinary file automatically.
+Current saved documents are managed on **Saved notes**.
+
+Private-key passwords are requested only when needed, including empty passwords
+for imported packets that use one. They are not cached between operations. New
+passwords have no enforced minimum and a 128-Unicode-character limit; strength
+indicators help estimate guessability without establishing a security guarantee.

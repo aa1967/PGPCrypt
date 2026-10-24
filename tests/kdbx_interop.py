@@ -56,7 +56,7 @@ def main():
         document = peer.request("document_save", profile_id=profile, title="Saved message",
                                 text="message saved inside the vault")["id"]
         peer.request("notes_set", text="notes created by PGPCrypt")
-        peer.request("settings_set", idle_timeout_seconds=120)
+        peer.request("settings_set", idle_timeout_seconds=120, preferences={"activity_welcome":"+-- portable ASCII --+\n|      fixture      |\n+-------------------+","workflows":[{"name":"Portable sign/encrypt","steps":["sign","encrypt"]}]})
         peer.lock()
         key_entry = "PGPCrypt/KDBX interop fixture"
         document_entry = "PGPCrypt/Personal/Saved message"
@@ -75,6 +75,12 @@ def main():
         def fields(entry):
             return {field.findtext("Key"): field.findtext("Value", default="")
                     for field in entry.findall("String")}
+
+        settings = [fields(entry) for entry in managed.findall("Entry") if fields(entry).get("PGPCrypt.Type") == "settings"]
+        assert len(settings) == 1 and settings[0]["PGPCrypt.Schema"] == "8"
+        preferences = json.loads(settings[0]["PGPCrypt.Preferences"])
+        assert preferences["workflows"] == [{"name":"Portable sign/encrypt","steps":["sign","encrypt"]}]
+        assert "portable ASCII" in preferences["activity_welcome"]
 
         references = []
         for name, group in identity_groups.items():

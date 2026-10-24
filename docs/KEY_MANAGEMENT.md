@@ -1,6 +1,6 @@
 # OpenPGP keys
 
-Use **Keys → New identity → Create key**. A name or pseudonym is
+Use **Keys → New key → Create key**. A name or pseudonym is
 required. Email and public comment are optional. The comment is part of the
 exported identity; keep private annotations in encrypted vault notes instead.
 
@@ -32,8 +32,7 @@ provide a GUI for signing other people's identities yet.
 
 ## Expiry and protection
 
-The default expiry is two years from creation. Choose a future UTC date/time or
-disable expiry. The selected validity applies to the primary and its subkeys.
+Expiry is off by default. Enable it to choose a future UTC date/time. The selected validity applies to the primary and its subkeys.
 The key details display the expiry, algorithm and advertised capabilities.
 Editing an existing certificate's expiry is not implemented yet.
 
@@ -70,7 +69,7 @@ always uses the recipients explicitly checked on the notepad.
 
 Creation also saves Sequoia's revocation certificate in the encrypted vault,
 atomically with the new key. Select the key and use **Show revocation
-certificate** to copy an offline backup. It does not revoke the certificate
+certificate** to copy a backup. It does not revoke the certificate
 inside the vault. An imported key without a stored ticket requires its primary
 private key to produce a ticket. If its packets are password protected, the
 key manager prompts for that password directly.
@@ -84,7 +83,7 @@ that other people never update.
 
 ## Automatic locking
 
-Automatic locking is off by default. **Settings → Preferences** offers optional
+Automatic locking is off by default. **Vault settings** offers optional
 inactivity locking (1–60 minutes), focus-loss locking, and desktop/suspend/Qubes
 host-lock integration. Lock ends both worker and unlocked UI processes; unsaved
 text is discarded. See [Settings](SETTINGS.md) for clipboard clearing and themes.
@@ -94,26 +93,37 @@ Native desktop and Qubes host-lock delivery still need real-system validation.
 
 The start screen offers Create vault, Open vault, and Quit. Create pre-fills
 `~/vault.pgpcrypt.age`, always requires matching password/passphrase fields, and
-shows a local zxcvbn strength estimate while typing. A minimum of 16 characters
-still applies regardless of the estimate. Open uses a file browser and requests
+shows a local zxcvbn strength estimate while typing. There is no enforced minimum; new passwords have a 128-Unicode-character limit. Open uses a file browser and requests
 only the existing vault's password/passphrase. Browse also selects a different
 save location. Recent vaults can open the password screen directly; disable
 remembering in Settings to clear their local paths. Qt file-dialog history
 remains disabled.
 
-## Subkeys (alpha7)
+## Subkey plans (alpha14)
 
 Select a key on **Keys**, then **Manage subkeys…**. The inspector
 shows primary/subkey fingerprints, algorithms, capabilities, expiration and
 status. Public-only certificates can be inspected; adding a subkey requires the
 primary private key and certification capability.
 
-Choose **Add subkey…**, then purpose (Encryption, Signing or Authentication),
-algorithm (Cv25519/Ed25519, RSA 2048/4096 or NIST curves) and an optional
-expiry within the primary key lifetime. Enter an optional new subkey password,
-with matching confirmation. If needed, a separate dialog asks for the primary
-key password to certify the new binding. The save is atomic; existing key
-packets, primary fingerprint, identity and revocation ticket remain intact.
+For new keys, enable the optional **Custom subkey plan** in the creation dialog.
+Add up to 16 rows with separate purpose (Encryption, Signing or Authentication),
+algorithm (Cv25519/Ed25519, RSA 2048/4096 or NIST curves) and expiry. This replaces
+the automatically selected subkeys, leaving certification on the primary key.
+Without a custom plan, the selected capability checkboxes retain their normal
+behavior. Custom plans do not apply to the single-RSA-key layout.
+
+For an existing key, choose **Add subkeys…** in its inspector and build the same
+kind of plan. Adding requires a valid certification-capable primary private key;
+a public-only certificate or subkey-only secret export cannot certify bindings.
+Each expiry must be in the future and cannot exceed the primary key's lifetime.
+A finite-lived primary requires finite-lived new subkeys. The new-subkey password
+is optional and applies to every row in that batch. A separate prompt requests
+the primary key password if needed; passwords are not saved in a plan.
+
+A whole batch is validated and generated before a single atomic vault save.
+A failed row leaves the stored certificate unchanged. Existing packets, primary
+fingerprint, identity and revocation ticket remain intact.
 
 Export and distribute the updated public certificate so other OpenPGP software
 can use the new subkey. Separate subkey revocation and expiry editing are not
@@ -149,3 +159,11 @@ secrets are tried first; otherwise the supplied password is tried against usable
 signing keys. A protected primary does not force a prompt when an unprotected
 signing subkey is available. Certificate-only and encryption-only keys cannot
 sign. Oversized imported password-derivation work is refused before derivation.
+
+## Clipboard import
+
+**Paste, clear clipboard and import** reads the clipboard once, clears it
+immediately and imports the captured armor into the selected profile. On failure
+the pasted text remains available in the import editor for correction. Public
+imports merge with an existing certificate without discarding its secret material.
+Clipboard managers and copies transferred to another Qube cannot be recalled.
