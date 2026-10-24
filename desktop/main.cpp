@@ -324,7 +324,10 @@ public:
         incoming.fill('\0');
     }
 
-    void smoke() { QTimer::singleShot(150, qApp, &QCoreApplication::quit); }
+    void smoke() { QTimer::singleShot(150,this,[this] {
+        if(!screenshotPath.isEmpty() && !grab().save(screenshotPath)) {qApp->exit(1); return;}
+        qApp->quit();
+    }); }
 
 public slots:
     void preparingForSleep(bool sleeping) { if (sleeping && unlocked && sessionLock) endSession(true); }

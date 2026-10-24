@@ -386,6 +386,7 @@ class Dialog final : public QDialog {
     void setBusy(bool value) {
         busy=value; tabs->setEnabled(!value); run->setEnabled(!value && available);
         refreshButton->setEnabled(!value); buttons->setEnabled(!value); internal->setEnabled(!value);
+        password->setEnabled(!value); confirmation->setEnabled(!value);
     }
     void populate() {
         const auto selected = devices->currentData(); devices->clear(); volumes->setRowCount(0);
