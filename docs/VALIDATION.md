@@ -1,5 +1,46 @@
 # Validation history
 
+## Alpha14 evidence
+
+Source `3db3f45` was pushed to `pgpcrypt-alpha14` before functional checks.
+All **76 Rust checks** passed: 59 core, 4 protection protocol, 1 GnuPG interop
+and 12 worker/lifecycle checks. Formatting and all-target/all-feature Clippy
+passed; Qt6 desktop compilation uses warnings as errors.
+
+The new protocol coverage exercises age and KDBX subkey batches with separate
+purposes/expiries, rejection without changing ciphertext when a later row is
+invalid, actual signing/encryption/decryption/verification, malformed workflow
+steps/names and welcome control sequences, reopen and bidirectional conversion.
+Manual workflow/welcome preferences and subkey counts survive both formats.
+Independent Debian age interoperability passed for current schema 9 and legacy
+schemas 1–8. Independent KeePassXC interoperability passed protected fields,
+identity groups/references, external edits, stale-write refusal and conversion,
+including protected workflow/welcome JSON under KDBX settings schema 8.
+
+Actual packaged checks passed ordinary-user direct launcher startup, permission
+failure guidance, both complete age/KDBX Qt workflows and supervisor replacement
+on lock. The expanded desktop checks cover real failed opens before unlock,
+counter/welcome/inventory display, clipboard replacement and one-click key import,
+Sign→Encrypt and Decrypt→Verify, authenticated Output reuse, changed-Output proof
+invalidation, failed-step abort, signature-failure recovery, document save/load,
+protection controls and clipboard cleanup. The final layout was inspected in an
+offscreen screenshot. Removable-media policy checks passed. Package metadata,
+dependencies, source/licenses, modes, ownership, Qubes handlers and ELF RPATH
+checks passed; no system installation was performed.
+
+Final README/evidence-only repackaging must preserve the hashes of all four
+validated executables and the launcher. Public package bytes/checksums/source
+commit are verified before updating install links and publishing the tag.
+GitHub's tag workflow independently repeats source, package and interoperability
+checks before attaching release assets; consult that run for its remote result.
+
+These component checks are not an independent security audit. Native Qubes,
+USB hardware, desktop lock/suspend delivery and clipboard-manager behavior remain
+unvalidated. KDBX writing remains experimental upstream. Profile/key/tag workflow
+associations are documented research, not executable automation. Bubblewrap
+remains deferred. Public metadata in session activity is visible while unlocked,
+but message bodies, passwords and advanced-protection events are excluded.
+
 ## Alpha13 evidence
 
 Source `228e8ff` was pushed to the existing PR #10 before functional checks.

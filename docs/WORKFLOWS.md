@@ -56,9 +56,11 @@ and ask on conflicting key/profile suggestions rather than silently selecting
 a signer or recipient. Deleting a target must remove dangling references.
 
 Tags could be private organizational labels with reusable suggestions. KeePass
-defines an ordinary entry `Tags` field, making it a useful compatibility candidate;
-lossless keepass-rs/KeePassXC round trips, case rules, separators and shared-key
-references need validation before adoption. A key shared by several profiles
+defines an ordinary entry `Tags` field. Inspection of keepass-rs 0.17.0 confirms
+its XML reader/writer maps this field to `Entry.tags`; PGPCrypt's XML allowlist
+already permits it. That makes it a useful compatibility candidate. Lossless
+PGPCrypt/KeePassXC round trips, case rules, separators and shared-key references
+still need validation before adopting tags in the interface. A key shared by several profiles
 should retain one canonical private-key entry. Tags and associations must remain
 inside encryption and must never encode passwords or bypass approval dialogs.
 
@@ -67,5 +69,6 @@ and cancellation design. Profiles are organizational categories, not isolation
 boundaries. None of this research enables extra permissions or remote execution.
 
 References: [KeePass XML structure](https://keepass.info/help/kb/kdbx.html),
+[keepass-rs tag mapping](https://github.com/sseemayer/keepass-rs/blob/v0.17.0/src/format/xml_db/entry.rs),
 [Kleopatra commands](https://invent.kde.org/pim/kleopatra/-/tree/master/src/commands),
 and [PGPCrypt key/subkey behavior](KEY_MANAGEMENT.md).
