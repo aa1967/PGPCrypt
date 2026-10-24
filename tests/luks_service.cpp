@@ -128,7 +128,7 @@ int main(int argc,char** argv) {
     auto reopened=Luks::openFile(filename,false,false,error); require(reopened!=nullptr,"open existing file");
     require(await([&](auto done) {service.formatNew(reopened,{},done);}).contains("newly"),"existing file cannot be formatted");
     QString attached;
-    require(await([&](auto done) {service.attach(reopened,false,[&attached,done](const QString& path,const QString& issue) {attached=path;done(issue);});}).isEmpty() && attached==fake.loop && fake.attachments==0,"reuse existing same-inode loop");
+    require(await([&](auto done) {service.attach(reopened,false,[&attached,done](const QString& path,const QString& issue) {attached=path;done(issue);});}).contains("attached already") && attached.isEmpty() && fake.attachments==0,"refuse a second loop and require explicit selection of an existing volume");
     require(await([&](auto done) {service.mount(fake.loop,"test key",true,done);}).isEmpty(),"unlock and mount existing container");
     require(fake.mountOptions.value("options").toString()=="ro,nosuid,nodev,noexec","read-only and restrictive mount flags");
     require(await([&](auto done) {service.mount(fake.loop,{},true,done);}).isEmpty(),"reuse an already read-only mounted volume");

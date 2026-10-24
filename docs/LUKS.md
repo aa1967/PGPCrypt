@@ -32,9 +32,12 @@ to work. No drive enumeration or UDisks call happens merely by displaying the
 landing page.
 
 Existing file containers are opened without following a final symlink, checked
-as regular files and attached using a Unix descriptor. Existing same-user loop
-attachments are reused to avoid opening the same backing file twice through
-this utility. The disk picker hides system-marked drives by default. **Show
+as regular files and attached using a Unix descriptor. If an existing loop
+appears to refer to the selected file, opening it as a second loop is refused;
+select the existing volume explicitly or close it first. A pathname alone
+cannot prove which inode an already-open kernel loop still holds after external
+file replacement. Creation selects its newly returned loop directly for the
+next mount action. The disk picker hides system-marked drives by default. **Show
 internal LUKS drives** includes otherwise eligible internal/Qubes virtual drives,
 subject to OS authorization. Active volumes at operating-system mount locations
 remain excluded. Container loops owned by your user are included even when
@@ -81,7 +84,7 @@ are accessible by keyboard.
 ## Validation scope
 
 An isolated fake UDisks service tests descriptor passing, new-file-only
-formatting, password transport, system-volume exclusion, loop reuse, mount
+formatting, password transport, system-volume exclusion, duplicate-loop refusal, mount
 flags, wrong-password errors, busy/error behavior, and unmount-before-lock
 ordering without mounting a real device or running a system service. Packaged
 GUI checks cover the unchanged database flows and the landing-page controls.

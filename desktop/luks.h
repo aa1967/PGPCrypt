@@ -90,6 +90,7 @@ struct File final {
     int directory = -1;
     bool fresh = false;
     qint64 bytes = 0;
+    QString loopPath;
     ~File() {if(fd >= 0) ::close(fd); if(directory >= 0) ::close(directory);}
     File() = default;
     File(const File&) = delete;
@@ -239,10 +240,10 @@ public:
             const auto backing=QFile::encodeName(bytePath(it.value().value(Loop).value("BackingFile")));
             struct stat attachedInfo{};
             if(::stat(backing.constData(),&attachedInfo)!=0 || sourceInfo.st_ino!=attachedInfo.st_ino || sourceInfo.st_dev!=attachedInfo.st_dev) continue;
-            if(file->fresh) {completed({},"This file is already attached; formatting has been refused."); return;}
-            if(it.value().value(Loop).value("SetupByUID").toUInt()!=::getuid()) {completed({},"This container is already attached by another user. Use its existing mount or ask that user to close it."); return;}
-            if(!readOnly && it.value().value(Block).value("ReadOnly").toBool()) {completed({},"This container is already attached read-only. Unmount and lock it before opening for writing."); return;}
-            completed(it.key().path(),{}); return;
+            // A backing pathname can have been replaced while an old loop still
+            // holds the original inode. Do not infer kernel device identity from
+            // stat(path) and silently reuse it; require explicit volume selection.
+            completed({},"This container appears to be attached already. Select its existing LUKS volume under Source → LUKS drive / partition, or unmount and lock it before opening the file again."); return;
         }
         QVariantMap options{{"read-only",readOnly},{"no-part-scan",true}};
         call(Root+"/Manager", "org.freedesktop.UDisks2.Manager", "LoopSetup",
@@ -312,6 +313,7 @@ public:
                || !object.value(Block).value("IdUsage").toString().isEmpty()) {
                 password.fill('\0'); completed("The new loop device could not be safely identified; it was not formatted."); return;
             }
+            file->loopPath=path;
             file->fresh=false; // A submitted format may commit even if its reply is lost.
             QVariantMap options{{"encrypt.type","luks2"},{"encrypt.passphrase",password},{"take-ownership",true}};
             call(path,Block,"Format",{"ext4",options},[this,completed](const QDBusMessage& reply) {
@@ -454,8 +456,8 @@ class Dialog final : public QDialog {
                 progress->hide(); cancelAllocation->hide();
                 if(!error.isEmpty()) {secret.fill('\0'); setBusy(false); showStatus(error); return;}
                 showStatus("Creating LUKS2 and an ext4 filesystem…");
-                service.formatNew(file,secret,[this,filename](const QString& issue) {
-                    if(issue.isEmpty()) {sourceType->setCurrentIndex(0); source->setText(filename); tabs->setCurrentIndex(0);}
+                service.formatNew(file,secret,[this,file,filename](const QString& issue) {
+                    if(issue.isEmpty()) {populate(); source->setText(filename); sourceType->setCurrentIndex(1); devices->setCurrentIndex(devices->findData(file->loopPath)); tabs->setCurrentIndex(0);}
                     finished(issue,"LUKS2 container created. Unlock & mount will mount it; if already unlocked no password is needed.");
                 });
                 secret.fill('\0');
