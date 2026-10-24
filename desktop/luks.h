@@ -215,8 +215,11 @@ public:
             if(pass==31) return false;
         }
         const QSet<QString> protectedMounts{"/","/boot","/boot/efi","/usr","/var","/home","/run","/etc","/bin","/lib","/lib64","/sbin","/tmp"};
-        for(const auto& child:children) for(const auto& folder:mounts(objects.value(QDBusObjectPath(child))))
-            if(protectedMounts.contains(folder)) return false;
+        for(const auto& child:children) {
+            const auto object=objects.value(QDBusObjectPath(child));
+            if(object.value("org.freedesktop.UDisks2.Swapspace").value("Active").toBool()) return false;
+            for(const auto& folder:mounts(object)) if(protectedMounts.contains(folder)) return false;
+        }
         return true;
     }
 
