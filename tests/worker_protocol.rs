@@ -43,7 +43,8 @@ impl Peer {
         let response = self.raw(op, fields)?;
         ensure!(
             response["ok"] == true,
-            "Operation failed: {}",
+            "Operation {} failed: {}",
+            op,
             response["error"]
         );
         Ok(response["data"].clone())
@@ -1384,11 +1385,8 @@ fn automation_switches_keys_supports_multiple_passwords_and_requires_expected_si
         let target = dir.path().join("converted");
         peer.ok("convert_copy",json!({"path":target,"format":if format=="age"{"kdbx"}else{"age"},"password":"portable"}))?;
         let mut copy = Peer::new()?;
-        copy.ok("open", json!({"path":target,"password":"portable"}))?;
-        assert_eq!(
-            copy.ok("settings_get", json!({}))?["preferences"]["workflows"],
-            workflows
-        );
+        let reopened = copy.ok("open", json!({"path":target,"password":"portable"}))?;
+        assert_eq!(reopened["preferences"]["workflows"], workflows);
     }
     Ok(())
 }
