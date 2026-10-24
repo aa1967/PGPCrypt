@@ -2,7 +2,7 @@
 
 ## Alpha15 evidence
 
-Source `e5d8e49` and correction `7b6cba7` were pushed to `pgpcrypt-alpha15`
+Source `e5d8e49`, correction `7b6cba7` and editor coverage `713ef86` were pushed to `pgpcrypt-alpha15`
 before their affected functional checks. **78 distinct Rust checks passed**:
 60 core, 4 protection protocol, 1 GnuPG interop and 13 worker/lifecycle checks.
 The initial full run passed 77 checks; the new multi-signer test then failed
@@ -30,6 +30,9 @@ Both actual packaged age/KDBX desktop workflows passed, including three batch
 files with valid inputs surrounding a bad input, separate result windows, private
 output modes, no overwrite/symlink behavior, continued execution after failure,
 unchanged Notepad input/output, side-by-side four-action panels and lock cleanup.
+A final package rerun also drove the Automation editor's actual key-picker dialog
+and Save workflows button, confirming persisted explicit keys and Notepad reload.
+Workflow list data is initialized before selection signals can populate the editor.
 Direct launcher startup, permission guidance and supervisor process replacement
 also passed. Package metadata, dependencies, source/licenses, modes, ownership,
 Qubes handlers and ELF RPATH checks passed. No system installation was performed.
