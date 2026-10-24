@@ -2462,12 +2462,21 @@ private:
                         runWorkflow(false,[this] {
                             if(workflowRunning || !tabs->isEnabled() || !output->toPlainText().isEmpty()) {fail("Failed workflow did not stop without publishing an intermediate result"); return;}
                             // Resume a valid result for the existing save/lock checks.
-                            input->setPlainText("Qt signature fixture"); textAction("sign",[this] {textAction("verify",[this] {testAutomationBatch([this]{testSavedMessageAndFinish();});},true);});
+                            input->setPlainText("Qt signature fixture"); textAction("sign",[this] {textAction("verify",[this] {testAutomationEditor([this]{testAutomationBatch([this]{testSavedMessageAndFinish();});});},true);});
                         });
                     },true);
                 },true);
             });
         });
+    }
+
+    void testAutomationEditor(std::function<void()> after) {
+        auto* name=workflowEditor->findChild<QLineEdit*>("automationName");auto* steps=workflowEditor->findChild<QTableWidget*>("automationSteps");
+        if(!name||name->text().isEmpty()||!steps||steps->rowCount()!=2){fail("Automation editor did not populate its selected workflow");return;}
+        name->setText("Desktop configured workflow");auto* mode=qobject_cast<QComboBox*>(steps->cellWidget(0,1));mode->setCurrentIndex(1);
+        QTimer::singleShot(0,this,[this]{auto* dialog=qobject_cast<QDialog*>(QApplication::activeModalWidget());auto* list=dialog?dialog->findChild<QListWidget*>():nullptr;auto* buttons=dialog?dialog->findChild<QDialogButtonBox*>():nullptr;if(!list||!buttons){fail("Workflow key-selection dialog is missing");return;}bool found=false;for(int i=0;i<list->count();++i){auto* item=list->item(i);const bool matches=item->data(Qt::UserRole).toString()==testFingerprint;item->setCheckState(matches?Qt::Checked:Qt::Unchecked);found=found||matches;}if(!found){fail("Workflow chooser did not offer the stored signing key");return;}buttons->button(QDialogButtonBox::Ok)->click();});
+        qobject_cast<QPushButton*>(steps->cellWidget(0,2))->click();if(ending)return;
+        auto* save=workflowEditor->findChild<QPushButton*>("saveWorkflows");save->click();testWaitForUi([this,after]{const auto preset=preferences.value("workflows").toArray().first().toObject();const auto first=workflowStep(preset.value("steps").toArray().first());if(preset.value("name").toString()!="Desktop configured workflow"||first.value("selection").toString()!="keys"||first.value("fingerprints").toArray()!=QJsonArray{testFingerprint}){fail("Automation editor did not persist its selected step keys");return;}after();});
     }
 
     void testAutomationBatch(std::function<void()> after) {
