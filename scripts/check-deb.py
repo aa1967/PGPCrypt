@@ -76,6 +76,8 @@ def main():
         assert "rustc" not in dependencies and "cargo" not in dependencies and "rustup" not in dependencies
         assert "bubblewrap" not in dependencies
         assert "libzxcvbn0" in dependencies
+        for dependency in ("udisks2", "libblockdev-crypto3", "cryptsetup-bin", "e2fsprogs", "polkitd"):
+            assert dependency in dependencies, dependency
         assert "libssl3t64 (>= 3.5.7-1~deb13u3)" in dependencies
         assert (stage / "usr/share/doc/pgpcrypt/third-party-licenses/age-0.12.1").is_dir()
         denied_folder = stage / "read-only"

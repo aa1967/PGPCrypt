@@ -81,6 +81,7 @@
 #include <unistd.h>
 #include <zxcvbn.h>
 #include "ui_helpers.h"
+#include "luks.h"
 
 namespace {
 constexpr int RestartLocked = 75;
@@ -375,7 +376,8 @@ private:
     QStackedWidget *root = nullptr;
     QWidget *sessionPage = nullptr, *lockedPage = nullptr, *homePage = nullptr, *workspaceBody = nullptr;
     QLineEdit *path = nullptr, *password = nullptr, *confirmation = nullptr, *search = nullptr;
-    QLabel *vaultTitle = nullptr, *confirmationLabel = nullptr, *strengthLabel = nullptr, *passwordHint = nullptr, *matchStatus = nullptr;
+    QLabel *vaultTitle = nullptr, *confirmationLabel = nullptr, *strengthLabel = nullptr, *matchStatus = nullptr;
+    QWidget* passwordHint = nullptr;
     QProgressBar* strengthMeter = nullptr;
     QComboBox* formatChoice = nullptr;
     QLabel* formatLabel = nullptr;
@@ -600,6 +602,7 @@ private:
         updateRecentVaultUi();
         welcome->addWidget(new QLabel("Key management • age and KeePass vaults"));
         welcome->addStretch();
+        welcome->addWidget(Luks::panel(homePage));
         root->addWidget(homePage);
 
         lockedPage = new QWidget;
@@ -636,8 +639,8 @@ private:
         outer->addLayout(form);
         strengthLabel = new QLabel; strengthLabel->setTextFormat(Qt::PlainText); outer->addWidget(strengthLabel);
         strengthMeter = new QProgressBar; strengthMeter->setRange(0,4); strengthMeter->setTextVisible(false); strengthMeter->setFixedHeight(10); outer->addWidget(strengthMeter);
-        passwordHint = new QLabel("No minimum length. Use a strong random password or passphrase; an empty password offers no guessing resistance. Maximum 128 characters. There is no password reset.");
-        passwordHint->setWordWrap(true); outer->addWidget(passwordHint);
+        passwordHint = contextHelp(lockedPage,"No minimum length. Use a strong random password or passphrase; an empty password offers no guessing resistance. Maximum 128 characters. There is no password reset.");
+        outer->addWidget(passwordHint,0,Qt::AlignLeft);
         matchStatus = new QLabel; matchStatus->setTextFormat(Qt::PlainText); outer->addWidget(matchStatus);
         strengthTimer.setSingleShot(true); strengthTimer.setInterval(180);
         connect(&strengthTimer,&QTimer::timeout,this,[this] { updatePasswordStrength(); });
@@ -1135,22 +1138,22 @@ private:
         connect(enable,&QCheckBox::toggled,minutes,&QWidget::setEnabled); connect(minutes,&QSlider::valueChanged,panel,[=](int value) {minuteLabel->setText(QString::number(value)+" minutes");});
         auto* focus=new QCheckBox("Lock when switching away from PGPCrypt"); form->addRow(focus);
         auto* events=new QCheckBox("Lock on desktop events or an allowed Qubes lock request"); form->addRow(events);
-        auto* eventHint=new QLabel("Desktop lock and suspend signals depend on your session. Qubes Lock requests require the documented dom0 hook and Qubes requests enabled below."); eventHint->setWordWrap(true); form->addRow(eventHint);
+        form->addRow("Desktop event help",contextHelp(panel,"Desktop lock and suspend signals depend on your session. Qubes Lock requests require the documented dom0 hook and Qubes requests enabled below. Database lock does not unmount an independently mounted LUKS volume."));
         auto* clip=new QCheckBox("Clear copied text after a delay"); form->addRow(clip);
         auto* seconds=new QSlider(Qt::Horizontal); seconds->setRange(5,1800); auto* secondLabel=new QLabel;
         auto* clipRow=new QHBoxLayout; clipRow->addWidget(seconds); clipRow->addWidget(secondLabel); form->addRow("Clipboard delay",clipRow);
         connect(clip,&QCheckBox::toggled,seconds,&QWidget::setEnabled); connect(seconds,&QSlider::valueChanged,panel,[=](int value) {secondLabel->setText(QString("%1m %2s").arg(value/60).arg(value%60));});
-        auto* clipHint=new QLabel("Lock always clears text still owned by PGPCrypt, even with this timer off. External clipboard history cannot be erased."); clipHint->setWordWrap(true); form->addRow(clipHint);
+        form->addRow("Clipboard help",contextHelp(panel,"Lock always clears text still owned by PGPCrypt, even with this timer off. External clipboard history cannot be erased."));
         auto* clearActivity=new QCheckBox("Periodically clear session activity"); form->addRow(clearActivity);
         auto* activitySeconds=new QSpinBox; activitySeconds->setRange(5,3600); activitySeconds->setSuffix(" seconds"); form->addRow("Activity clear interval",activitySeconds); connect(clearActivity,&QCheckBox::toggled,activitySeconds,&QWidget::setEnabled);
         auto* stats=new QCheckBox("Show unlock-attempt and action counters for this window"); form->addRow(stats);
-        auto* statsHint=new QLabel("Counters are kept only until this vault locks or this window closes/restarts, including a reboot. Failed opens are shown after successful unlock and can include password or file errors. Inventory counts always appear above Session activity. No login history is saved."); statsHint->setWordWrap(true); form->addRow(statsHint);
+        form->addRow("Counter help",contextHelp(panel,"Counters are kept only until this vault locks or this window closes/restarts, including a reboot. Failed opens are shown after successful unlock and can include password or file errors. Inventory counts always appear above Session activity. No login history is saved."));
         auto* welcome=new QPlainTextEdit; welcome->setObjectName("activityWelcomeSetting"); welcome->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont)); welcome->setMaximumHeight(95); welcome->setPlaceholderText("Optional welcome text or ASCII art (16 lines / 2 KiB). Stored inside this vault."); form->addRow("Activity welcome block",welcome);
         auto* usb=new QCheckBox("Allow removable media for message import and export"); form->addRow(usb);
-        auto* usbHint=new QLabel("Off hides USB/removable mounts in the message picker and blocks message reads/writes there. It does not disable OS automounting, other applications, or opening a vault stored on a USB device."); usbHint->setWordWrap(true); form->addRow(usbHint);
+        form->addRow("Removable-media help",contextHelp(panel,"Off hides USB/removable mounts in the message picker and blocks message reads/writes there. It does not disable OS automounting, other applications, the optional landing-page LUKS disk utility, or opening a vault stored on a USB device."));
         memoryStatus=new QLabel; memoryStatus->setTextFormat(Qt::PlainText); memoryStatus->setWordWrap(true); form->addRow("Worker memory",memoryStatus);
         auto* qubes=new QCheckBox("Allow requests from other Qubes while unlocked"); form->addRow(qubes);
-        auto* qubesHint=new QLabel("A named-client dom0 policy is required. You approve each signing/decryption request here; private keys stay in this Qube. Setup: /usr/share/doc/pgpcrypt/design/QUBES.md"); qubesHint->setWordWrap(true); form->addRow(qubesHint);
+        form->addRow("Qubes request help",contextHelp(panel,"A named-client dom0 policy is required. You approve each signing/decryption request here; private keys stay in this Qube. Setup: /usr/share/doc/pgpcrypt/design/QUBES.md"));
         auto* save=new QPushButton("Save preferences"); form->addRow(save);
         connect(save,&QPushButton::clicked,this,[=,this] {
             QJsonObject value{{"auto_lock",enable->isChecked()},{"lock_on_focus_loss",focus->isChecked()},{"lock_on_session_events",events->isChecked()},{"clipboard_clear_seconds",clip->isChecked()?seconds->value():0},{"theme",theme->currentData().toString()},{"qubes_rpc",qubes->isChecked()},{"notepad_popout",popout->isChecked()},{"activity_clear_seconds",clearActivity->isChecked()?activitySeconds->value():0},{"show_session_stats",stats->isChecked()},{"allow_removable_media",usb->isChecked()}};
@@ -2332,6 +2335,8 @@ private:
     void testCreateForm() {
         if(!testRecentVaultHistory()) return;
         if(root->currentWidget()!=homePage) { fail("Start screen is missing"); return; }
+        auto* diskPanel=homePage->findChild<QWidget*>("luksPanel");
+        if(!diskPanel || diskPanel->findChildren<QPushButton*>().size()!=3 || diskPanel->findChildren<QToolButton*>().size()!=1) {fail("Optional landing-page LUKS controls or help are missing"); return;}
         showVaultForm(true);
         if(path->text()!=QDir::home().filePath("vault.pgpcrypt.age") || !confirmation->isVisible()) { fail("Create form defaults are missing"); return; }
         if(testKdbx) {
