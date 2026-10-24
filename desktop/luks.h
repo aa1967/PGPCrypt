@@ -466,13 +466,15 @@ class Dialog final : public QDialog {
         secret.fill('\0');
     }
 public:
-    explicit Dialog(QWidget* parent, int initialTab = 0) : QDialog(parent), service(this) {
+    explicit Dialog(QWidget* parent, int initialTab = 0,
+                    QDBusConnection connection = QDBusConnection::systemBus(), QString name = "org.freedesktop.UDisks2")
+        : QDialog(parent), service(this,std::move(connection),std::move(name)) {
         setObjectName("luksDialog"); setWindowTitle("LUKS volumes"); resize(830,540);
         auto* layout=new QVBoxLayout(this);
         auto* heading=new QHBoxLayout; heading->addWidget(new QLabel("LUKS drives and containers")); heading->addWidget(contextHelp(this,Help)); heading->addStretch(); layout->addLayout(heading);
         auto* scopeRow=new QHBoxLayout; internal=new QCheckBox("Show internal LUKS drives"); scopeRow->addWidget(internal); scopeRow->addWidget(contextHelp(this,"UDisks labels many internal and Qubes virtual disks as system devices. Enable to include unused internal LUKS drives; the OS may request administrator authorization. Active volumes mounted at operating-system locations remain excluded. This never enables drive formatting. Container loops owned by your user are always included.")); scopeRow->addStretch(); layout->addLayout(scopeRow);
         connect(internal,&QCheckBox::toggled,this,[this](bool value) {service.includeInternal=value; if(!busy) refresh(false);});
-        tabs=new QTabWidget; layout->addWidget(tabs);
+        tabs=new QTabWidget; tabs->setObjectName("luksTabs"); layout->addWidget(tabs);
         auto* open=new QWidget; auto* openForm=new QFormLayout(open);
         sourceType=new QComboBox; sourceType->addItems({"Container file","LUKS drive / partition"}); openForm->addRow("Source",sourceType);
         auto* fileRow=new QHBoxLayout; source=new QLineEdit; auto* browse=new QPushButton("Browse…"); fileRow->addWidget(source); fileRow->addWidget(browse); openForm->addRow("Container",fileRow);
@@ -480,16 +482,16 @@ public:
         readOnly=new QCheckBox("Mount read-only"); openForm->addRow(readOnly);
         tabs->addTab(open,"Unlock && mount");
         auto* create=new QWidget; auto* createForm=new QFormLayout(create);
-        auto* newRow=new QHBoxLayout; destination=new QLineEdit(QDir::home().filePath("vault.luks")); auto* choose=new QPushButton("Save as…"); newRow->addWidget(destination); newRow->addWidget(choose); createForm->addRow("New container",newRow);
-        capacity=new QSpinBox; capacity->setRange(64,65536); capacity->setValue(256); capacity->setSuffix(" MiB"); createForm->addRow("Capacity",capacity);
+        auto* newRow=new QHBoxLayout; destination=new QLineEdit(QDir::home().filePath("vault.luks")); destination->setObjectName("luksDestination"); auto* choose=new QPushButton("Save as…"); newRow->addWidget(destination); newRow->addWidget(choose); createForm->addRow("New container",newRow);
+        capacity=new QSpinBox; capacity->setObjectName("luksCapacity"); capacity->setRange(64,65536); capacity->setValue(256); capacity->setSuffix(" MiB"); createForm->addRow("Capacity",capacity);
         createForm->addRow("About creation",contextHelp(this,"Creates a new private file with a fixed capacity, fully fills it with system randomness, then creates standard LUKS2 and ext4 through UDisks/cryptsetup. Existing files and raw drives are never formatted. This can take time and requires the full amount of disk space. Failed or interrupted creation can leave an incomplete file. LUKS headers and file size remain identifiable; fixed capacity does not guarantee plausible deniability. Cryptsetup supplies the encryption/KDF defaults; no application crypto is invented."));
         tabs->addTab(create,"Create LUKS2 container");
         auto* manage=new QWidget; auto* manageLayout=new QVBoxLayout(manage);
         volumes=new QTableWidget(0,3); volumes->setHorizontalHeaderLabels({"Volume / container","State","Mounted folder"}); volumes->setEditTriggers(QAbstractItemView::NoEditTriggers); volumes->setSelectionBehavior(QAbstractItemView::SelectRows); volumes->setSelectionMode(QAbstractItemView::SingleSelection); volumes->verticalHeader()->hide(); volumes->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive); volumes->setColumnWidth(0,330); volumes->setColumnWidth(1,155); volumes->horizontalHeader()->setStretchLastSection(true); manageLayout->addWidget(volumes);
         manageLayout->addWidget(contextHelp(this,"Lists non-system LUKS volumes and container loops set up by your user, including volumes opened outside PGPCrypt. Nothing is recorded by PGPCrypt. Unmount & lock acts only on your selection and never forces a busy filesystem closed. Close applications using it before retrying. A locked container loop may also be detached. System volumes are excluded. After closing PGPCrypt or locking a database, mounted volumes stay mounted until explicitly closed here or with another disk tool."));
         tabs->addTab(manage,"Mounts"); tabs->setCurrentIndex(initialTab);
-        auto* auth=new QFormLayout; password=new QLineEdit; password->setEchoMode(QLineEdit::Password); password->setInputMethodHints(Qt::ImhSensitiveData|Qt::ImhNoPredictiveText|Qt::ImhNoAutoUppercase); password->setMaxLength(32767); auth->addRow("Password/passphrase",password);
-        confirmation=new QLineEdit; confirmation->setEchoMode(QLineEdit::Password); confirmation->setInputMethodHints(password->inputMethodHints()); confirmation->setMaxLength(256); auth->addRow("Confirm password/passphrase",confirmation); layout->addLayout(auth);
+        auto* auth=new QFormLayout; password=new QLineEdit; password->setObjectName("luksPassword"); password->setEchoMode(QLineEdit::Password); password->setInputMethodHints(Qt::ImhSensitiveData|Qt::ImhNoPredictiveText|Qt::ImhNoAutoUppercase); password->setMaxLength(32767); auth->addRow("Password/passphrase",password);
+        confirmation=new QLineEdit; confirmation->setObjectName("luksConfirmation"); confirmation->setEchoMode(QLineEdit::Password); confirmation->setInputMethodHints(password->inputMethodHints()); confirmation->setMaxLength(256); auth->addRow("Confirm password/passphrase",confirmation); layout->addLayout(auth);
         strength=new QLabel; strength->setTextFormat(Qt::PlainText); layout->addWidget(strength); strengthBar=new QProgressBar; strengthBar->setRange(0,4); strengthBar->setTextVisible(false); strengthBar->setMaximumHeight(10); layout->addWidget(strengthBar);
         auto* strengthTimer=new QTimer(this); strengthTimer->setSingleShot(true); strengthTimer->setInterval(180);
         connect(password,&QLineEdit::textChanged,strengthTimer,qOverload<>(&QTimer::start));

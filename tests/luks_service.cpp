@@ -18,6 +18,13 @@ static QString await(const std::function<void(Luks::Completion)>& start) {
     if(!done) loop.exec();
     return result;
 }
+static void until(const std::function<bool()>& condition) {
+    QEventLoop loop; QTimer check,deadline; deadline.setSingleShot(true); deadline.start(15000);
+    QObject::connect(&deadline,&QTimer::timeout,&loop,&QEventLoop::quit);
+    QObject::connect(&check,&QTimer::timeout,&loop,[&] {if(condition()) loop.quit();}); check.start(5);
+    if(!condition()) loop.exec();
+    require(condition(),"GUI operation completed before deadline");
+}
 
 class FakeDisks final : public QDBusVirtualObject {
 public:
@@ -55,7 +62,8 @@ public:
             require(fd.isValid() && ::fstat(fd.fileDescriptor(),&info)==0 && S_ISREG(info.st_mode),"loop receives a real regular-file descriptor");
             const auto options=qdbus_cast<QVariantMap>(message.arguments().at(1));
             require(options.value("no-part-scan").toBool(),"no automatic partition scan");
-            objects[QDBusObjectPath(fresh)]={{Luks::Block,{{"HintSystem",false},{"IdUsage",""},{"PreferredDevice",QByteArray("/dev/loop1")}}},{Luks::Loop,{{"SetupByUID",static_cast<uint>(::getuid())},{"BackingFile",QByteArray("/unused/new-container")}}}};
+            QByteArray backing(4096,'\0'); const auto proc=QByteArray("/proc/self/fd/")+QByteArray::number(fd.fileDescriptor()); const auto length=::readlink(proc.constData(),backing.data(),static_cast<size_t>(backing.size())); require(length>0,"inspect received descriptor identity"); backing.resize(length);
+            objects[QDBusObjectPath(fresh)]={{Luks::Block,{{"HintSystem",true},{"IdUsage",""},{"PreferredDevice",QByteArray("/dev/loop1")}}},{Luks::Loop,{{"SetupByUID",static_cast<uint>(::getuid())},{"BackingFile",backing}}}};
             ok({QVariant::fromValue(QDBusObjectPath(fresh))}); return true;
         }
         if(name=="Unlock") {
@@ -147,5 +155,25 @@ int main(int argc,char** argv) {
     require(await([&](auto done) {service.formatNew(fresh,{},done);}).contains("newly") && fake.formats==1,"do not repeat submitted formatting");
     auto* panel=Luks::panel(nullptr); require(panel->findChildren<QPushButton*>().size()==3,"three landing controls");
     const auto help=panel->findChildren<QToolButton*>(); require(help.size()==1 && help.first()->toolTip().contains("separate") && help.first()->focusPolicy()!=Qt::NoFocus,"hover/click/keyboard help"); delete panel;
+    {
+        Luks::Dialog dialog(nullptr,1,client,"org.pgpcrypt.TestDisks"); dialog.show();
+        auto* run=dialog.findChild<QPushButton*>("luksRun"); auto* tabs=dialog.findChild<QTabWidget*>("luksTabs");
+        auto* target=dialog.findChild<QLineEdit*>("luksDestination"); auto* password=dialog.findChild<QLineEdit*>("luksPassword"); auto* confirmation=dialog.findChild<QLineEdit*>("luksConfirmation");
+        require(run && tabs && target && password && confirmation,"real disk-dialog controls");
+        until([&] {return run->isEnabled();});
+        require(dialog.grab().save("target/validation/alpha16-luks-dialog.png"),"capture disk-dialog layout");
+        target->setText(filename); password->setText("q"); confirmation->setText("q"); run->click();
+        require(fake.formats==1,"GUI cannot overwrite an existing container");
+        const auto created=temporary.filePath("gui.luks"); target->setText(created);
+        dialog.findChild<QSpinBox*>("luksCapacity")->setValue(64);
+        password->setText("q"); confirmation->setText("q"); run->click();
+        require(!run->isEnabled() && !password->isEnabled(),"pending credentials and duplicate execution disabled");
+        until([&] {return run->isEnabled();});
+        require(fake.formats==2 && tabs->currentIndex()==0 && password->text().isEmpty(),"background creation completes and selects new source without keeping password");
+        require(fake.formatOptions.value("encrypt.passphrase").toByteArray()=="q" && QFileInfo(created).size()==64*1024*1024,"short password accepted and capacity fully allocated");
+        run->click(); until([&] {return run->isEnabled();});
+        require(fake.mounted && fake.mountOptions.value("options").toString()=="nosuid,nodev,noexec","GUI mounts just-created container without duplicate loop or second unlock");
+        dialog.reject();
+    }
     std::puts("LUKS private-bus checks passed: file safety, descriptor credentials, slot-independent mounting, failure handling and close ordering; no real disks used.");
 }
