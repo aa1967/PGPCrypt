@@ -1,7 +1,7 @@
 # Profiles and saved documents
 
-The workspace has five navigation buttons: **Keys**, **Notepad**, **Identities**,
-**Saved notes** and **Vault settings**. All data described here stays inside the encrypted age/KDBX
+The workspace has six navigation buttons: **Keys**, **Notepad**, **Identities**,
+**Saved notes**, **Automation** and **Vault settings**. All data described here stays inside the encrypted age/KDBX
 vault, except files deliberately imported/exported, recent-vault paths, and
 optional protection companion records described separately.
 
@@ -73,7 +73,7 @@ full fingerprint over a trusted channel.
 
 ## Portable recovery
 
-age schema 9 stores `data.profiles` and `data.documents`. KDBX settings schema 8
+age schema 10 stores `data.profiles` and `data.documents`. KDBX settings schema 9
 stores profiles in protected `PGPCrypt.Profiles` JSON and actual identity
 groups. Each group contains an Identity details entry, its documents and
 references to canonical keys. Identity fields map to ordinary UserName, Email,
@@ -160,3 +160,12 @@ performs normal verification. Failed actions do not overwrite the original
 Output with an intermediate result or leave an old verification badge.
 
 Reusable manual workflows are described in [WORKFLOWS.md](WORKFLOWS.md).
+
+## Alpha15 automation
+
+Workflow editing now lives on Automation. Notepad places Input and Output side by
+side, with four operations above each. Load a workflow, select Input, Output or
+Batch files, then Execute. Explicit per-step keys can come from any identity; they
+intentionally override the Notepad profile filter. Batch files receive separate
+result windows and editable destination names. See [WORKFLOWS.md](WORKFLOWS.md)
+for key combinations, verification requirements, no-overwrite exports and limits.

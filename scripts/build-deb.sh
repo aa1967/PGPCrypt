@@ -4,7 +4,7 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
 ./scripts/build-desktop.sh --release
 ./scripts/dev.sh build --release --locked --features legacy-migration --bin pgpcrypt-migrate --bin pgpcrypt-qrexec -j 4
-package_version=${PGPCRYPT_PACKAGE_VERSION:-0.1.0~alpha14}
+package_version=${PGPCRYPT_PACKAGE_VERSION:-0.1.0~alpha15}
 dpkg --validate-version "$package_version"
 # GitHub release uploads normalize '~' to '.', so choose that filename before
 # computing checksums. Debian's internal Version retains prerelease ordering.

@@ -566,8 +566,33 @@ fn add_subkey_with_budget(
     Ok(result)
 }
 
-pub fn sign(text: &str, cert: &Cert, password: &str) -> Result<String> {
-    bounded(text)?;
+#[derive(Clone, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
+pub struct KeyPassword {
+    pub fingerprint: String,
+    pub password: String,
+}
+fn key_password<'a>(passwords: &'a [KeyPassword], fingerprint: &str, fallback: &'a str) -> &'a str {
+    passwords
+        .iter()
+        .find(|entry| entry.fingerprint == fingerprint)
+        .map_or(fallback, |entry| entry.password.as_str())
+}
+
+#[derive(Debug)]
+pub struct KeyPasswordHint(pub String);
+impl std::fmt::Display for KeyPasswordHint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Unlock key {}", self.0)
+    }
+}
+impl std::error::Error for KeyPasswordHint {}
+
+fn signing_pair(
+    cert: &Cert,
+    password: &str,
+    budget: &mut SecretUnlockBudget,
+) -> Result<openpgp::crypto::KeyPair> {
     let policy = StandardPolicy::new();
     validate_for_new_operation(cert, &policy)?;
     let mut keys: Vec<_> = cert
@@ -585,7 +610,6 @@ pub fn sign(text: &str, cert: &Cert, password: &str) -> Result<String> {
         // for an unrelated password when an eligible signing key needs none.
         keys.sort_by_key(|ka| ka.key().secret().is_encrypted());
     }
-    let mut budget = SecretUnlockBudget::default();
     let mut password_required = false;
     let mut unusable = None;
     for candidate in keys {
@@ -602,20 +626,47 @@ pub fn sign(text: &str, cert: &Cert, password: &str) -> Result<String> {
                 continue;
             }
         };
-        let mut output = Vec::new();
-        // The cleartext signature framework supplies its own armor and text
-        // canonicalization. Neither Armorer nor LiteralWriter belongs here.
-        let mut message = Signer::new(Message::new(&mut output), key.into_keypair()?)?
-            .cleartext()
-            .build()?;
-        message.write_all(text.as_bytes())?;
-        message.finalize()?;
-        return Ok(String::from_utf8(output)?);
+        return key.into_keypair();
     }
     if password_required {
         return Err(PasswordRequired.into());
     }
     Err(unusable.context("Selected key has no usable signing secret")?)
+}
+
+pub fn sign(text: &str, cert: &Cert, password: &str) -> Result<String> {
+    sign_many(text, std::slice::from_ref(cert), password, &[])
+}
+pub fn sign_many(
+    text: &str,
+    certs: &[Cert],
+    password: &str,
+    passwords: &[KeyPassword],
+) -> Result<String> {
+    bounded(text)?;
+    ensure!((1..=16).contains(&certs.len()), "Choose 1–16 signing keys");
+    let mut budget = SecretUnlockBudget::default();
+    let mut pairs = Vec::new();
+    for cert in certs {
+        let fp = cert.fingerprint().to_hex();
+        pairs.push(
+            signing_pair(cert, key_password(passwords, &fp, password), &mut budget)
+                .with_context(|| KeyPasswordHint(fp))?,
+        );
+    }
+    let mut output = Vec::new();
+    let mut pairs = pairs.into_iter();
+    let mut builder = Signer::new(
+        Message::new(&mut output),
+        pairs.next().context("Missing signing key")?,
+    )?;
+    for pair in pairs {
+        builder = builder.add_signer(pair)?;
+    }
+    let mut message = builder.cleartext().build()?;
+    message.write_all(text.as_bytes())?;
+    message.finalize()?;
+    Ok(String::from_utf8(output)?)
 }
 
 fn bounded(text: &str) -> Result<()> {
@@ -655,6 +706,8 @@ struct Helper {
     require_signature: bool,
     signers: Vec<String>,
     decryption_keys: Vec<String>,
+    decryption_filter: Vec<String>,
+    key_passwords: Vec<KeyPassword>,
     unlock_budget: SecretUnlockBudget,
 }
 
@@ -695,7 +748,13 @@ impl DecryptionHelper for Helper {
         let policy = StandardPolicy::new();
         let mut password_required = false;
         let mut unusable = None;
+        let mut needed_key = None;
         for cert in &self.certs {
+            let fingerprint = cert.fingerprint().to_hex();
+            if !self.decryption_filter.is_empty() && !self.decryption_filter.contains(&fingerprint)
+            {
+                continue;
+            }
             for ka in cert
                 .keys()
                 .secret()
@@ -713,10 +772,16 @@ impl DecryptionHelper for Helper {
                 }) {
                     continue;
                 }
-                let key = match self.unlock_budget.unlock(key, self.password.as_str()) {
+                let key = match self.unlock_budget.unlock(
+                    key,
+                    key_password(&self.key_passwords, &fingerprint, self.password.as_str()),
+                ) {
                     Ok(key) => key,
                     Err(error) if error.is::<PasswordRequired>() => {
                         password_required = true;
+                        if needed_key.is_none() {
+                            needed_key = Some(fingerprint.clone());
+                        }
                         continue;
                     }
                     Err(error) => {
@@ -738,7 +803,8 @@ impl DecryptionHelper for Helper {
             }
         }
         if password_required {
-            return Err(PasswordRequired.into());
+            return Err(anyhow::Error::new(PasswordRequired)
+                .context(KeyPasswordHint(needed_key.unwrap_or_default())));
         }
         if let Some(error) = unusable {
             return Err(error);
@@ -767,6 +833,15 @@ fn read_authenticated(reader: &mut impl Read) -> Result<Zeroizing<String>> {
 }
 
 pub fn decrypt(text: &str, certs: Vec<Cert>, password: &str) -> Result<Opened> {
+    decrypt_selected(text, certs, password, &[], &[])
+}
+pub fn decrypt_selected(
+    text: &str,
+    certs: Vec<Cert>,
+    password: &str,
+    allowed: &[String],
+    passwords: &[KeyPassword],
+) -> Result<Opened> {
     bounded_message(text)?;
     let helper = Helper {
         certs,
@@ -774,6 +849,8 @@ pub fn decrypt(text: &str, certs: Vec<Cert>, password: &str) -> Result<Opened> {
         require_signature: false,
         signers: vec![],
         decryption_keys: vec![],
+        decryption_filter: allowed.to_vec(),
+        key_passwords: passwords.to_vec(),
         unlock_budget: SecretUnlockBudget::default(),
     };
     let policy = StandardPolicy::new();
@@ -796,6 +873,8 @@ pub fn verify(text: &str, certs: Vec<Cert>) -> Result<Opened> {
         require_signature: true,
         signers: vec![],
         decryption_keys: vec![],
+        decryption_filter: vec![],
+        key_passwords: Vec::new(),
         unlock_budget: SecretUnlockBudget::default(),
     };
     let policy = StandardPolicy::new();

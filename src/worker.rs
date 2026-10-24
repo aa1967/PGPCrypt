@@ -45,6 +45,14 @@ pub struct Request {
     #[serde(default)]
     pub recipients: Vec<String>,
     #[serde(default)]
+    pub signing_keys: Vec<String>,
+    #[serde(default)]
+    pub key_fingerprints: Vec<String>,
+    #[serde(default)]
+    pub required_signers: Vec<String>,
+    #[serde(default)]
+    pub key_passwords: Vec<pgp::KeyPassword>,
+    #[serde(default)]
     pub key_options: Option<pgp::KeyOptions>,
     #[serde(default)]
     pub idle_timeout_seconds: Option<u32>,
@@ -226,6 +234,13 @@ impl Session {
     }
 
     pub fn handle(&mut self, request: &Request) -> Result<Value> {
+        crate::workflows::validate_keys(
+            &request
+                .key_passwords
+                .iter()
+                .map(|entry| entry.fingerprint.clone())
+                .collect::<Vec<_>>(),
+        )?;
         if self.vault.as_ref().is_some_and(Vault::is_read_only) {
             ensure!(
                 matches!(
@@ -769,25 +784,66 @@ impl Session {
                 Ok(json!({"text":pgp::encrypt(&request.text, &selected)?}))
             }
             "sign" => {
-                let fingerprint = if request.fingerprint.is_empty() {
-                    &self.vault()?.data.default_signing_key
+                crate::workflows::validate_keys(&request.signing_keys)?;
+                let fingerprints = if request.signing_keys.is_empty() {
+                    vec![if request.fingerprint.is_empty() {
+                        self.vault()?.data.default_signing_key.clone()
+                    } else {
+                        request.fingerprint.clone()
+                    }]
                 } else {
-                    &request.fingerprint
+                    request.signing_keys.clone()
                 };
-                let cert = self
-                    .certs_for_profile(&request.profile_id)?
-                    .into_iter()
-                    .find(|c| c.fingerprint().to_hex() == *fingerprint)
-                    .context("Choose a signing key")?;
-                Ok(json!({"text":pgp::sign(&request.text,&cert,&request.password)?}))
+                let all = self.certs_for_profile(&request.profile_id)?;
+                let mut selected = Vec::new();
+                for fp in &fingerprints {
+                    selected.push(
+                        all.iter()
+                            .find(|cert| cert.fingerprint().to_hex() == *fp)
+                            .context("Signing key is unavailable in this profile")?
+                            .clone(),
+                    );
+                }
+                Ok(
+                    json!({"text":pgp::sign_many(&request.text,&selected,&request.password,&request.key_passwords)?,"signing_keys":fingerprints}),
+                )
             }
             "decrypt" | "verify" => {
-                let certs = self.certs_for_profile(&request.profile_id)?;
+                crate::workflows::validate_keys(&request.key_fingerprints)?;
+                crate::workflows::validate_keys(&request.required_signers)?;
+                let mut certs = self.certs_for_profile(&request.profile_id)?;
+                ensure!(
+                    request
+                        .key_fingerprints
+                        .iter()
+                        .all(|fp| certs.iter().any(|cert| cert.fingerprint().to_hex() == *fp)),
+                    "A selected key is missing from this profile"
+                );
+                if request.op == "verify" && !request.key_fingerprints.is_empty() {
+                    certs.retain(|cert| {
+                        request
+                            .key_fingerprints
+                            .contains(&cert.fingerprint().to_hex())
+                    });
+                }
                 let opened = if request.op == "decrypt" {
-                    pgp::decrypt(&request.text, certs.clone(), &request.password)?
+                    pgp::decrypt_selected(
+                        &request.text,
+                        certs.clone(),
+                        &request.password,
+                        &request.key_fingerprints,
+                        &request.key_passwords,
+                    )?
                 } else {
                     pgp::verify(&request.text, certs.clone()).map_err(|_| VerificationFailed)?
                 };
+                if !request
+                    .required_signers
+                    .iter()
+                    .all(|fp| opened.signers.contains(fp))
+                {
+                    return Err(VerificationFailed.into());
+                }
                 let policy = StandardPolicy::new();
                 let signer_details=opened.signers.iter().map(|fingerprint| {
                     let identities=certs.iter().find(|cert|cert.fingerprint().to_hex()==*fingerprint).and_then(|cert|cert.with_policy(&policy,None).ok()).map(|valid|valid.userids().revoked(false).map(|userid|String::from_utf8_lossy(userid.userid().value()).into_owned()).collect::<Vec<_>>()).unwrap_or_default();
@@ -900,7 +956,15 @@ pub fn run(mut input: impl BufRead, mut output: impl Write) -> Result<()> {
                 } else {
                     "operation_failed"
                 };
-                json!({"id":request.id,"ok":false,"error":format!("{error:#}"),"code":code,"diagnostic":diagnostic_code(&request.op,&error)})
+                let required_key = if code == "password_required" {
+                    error
+                        .downcast_ref::<pgp::KeyPasswordHint>()
+                        .map(|hint| hint.0.as_str())
+                        .unwrap_or("")
+                } else {
+                    ""
+                };
+                json!({"id":request.id,"ok":false,"error":format!("{error:#}"),"code":code,"required_key":required_key,"diagnostic":diagnostic_code(&request.op,&error)})
             }
         };
         let bytes = Zeroizing::new(serde_json::to_vec(&result)?);

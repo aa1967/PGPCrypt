@@ -1307,3 +1307,88 @@ fn subkey_batches_are_atomic_and_workflow_metadata_is_portable() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn automation_switches_keys_supports_multiple_passwords_and_requires_expected_signers() -> Result<()>
+{
+    for format in ["age", "kdbx"] {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("automation-vault");
+        let mut peer = Peer::new()?;
+        peer.ok(
+            "create",
+            json!({"path":path,"password":"vault fixture","format":format}),
+        )?;
+        let mut fingerprints = Vec::new();
+        for (name, password) in [
+            ("Signer Alpha", "alpha"),
+            ("Signer Beta", "beta"),
+            ("Other signer", ""),
+        ] {
+            let response=peer.ok("generate",json!({"password":password,"key_options":{"name":name,"algorithm":"cv25519","layout":"subkeys","signing":true,"certification":true,"transport_encryption":true,"storage_encryption":true,"expires_at":null}}))?;
+            fingerprints.push(response["fingerprint"].as_str().unwrap().to_owned());
+        }
+        let a = &fingerprints[0];
+        let b = &fingerprints[1];
+        let c = &fingerprints[2];
+        let missing = peer.raw(
+            "sign",
+            json!({"text":"Multiple signer fixture","signing_keys":[a,b]}),
+        )?;
+        assert_eq!(missing["code"], "password_required");
+        assert_eq!(missing["required_key"], *a);
+        let partial=peer.raw("sign",json!({"text":"Multiple signer fixture","signing_keys":[a,b],"key_passwords":[{"fingerprint":a,"password":"alpha"}]}))?;
+        assert_eq!(partial["code"], "password_required");
+        assert_eq!(partial["required_key"], *b);
+        let signed=peer.ok("sign",json!({"text":"Multiple signer fixture","signing_keys":[a,b],"key_passwords":[{"fingerprint":a,"password":"alpha"},{"fingerprint":b,"password":"beta"}]}))?["text"].clone();
+        let verified = peer.ok(
+            "verify",
+            json!({"text":signed,"key_fingerprints":[a,b],"required_signers":[a,b]}),
+        )?;
+        assert_eq!(verified["text"], "Multiple signer fixture");
+        assert_eq!(verified["signer_details"].as_array().unwrap().len(), 2);
+        for fields in [
+            json!({"text":signed,"key_fingerprints":[a]}),
+            json!({"text":signed,"required_signers":[c]}),
+        ] {
+            let rejected = peer.raw("verify", fields)?;
+            assert_eq!(rejected["code"], "verification_failed");
+            assert!(rejected.get("data").is_none());
+        }
+        let duplicate = peer.raw("sign", json!({"text":"test","signing_keys":[a,a]}))?;
+        assert_eq!(duplicate["ok"], false);
+        let encrypted =
+            peer.ok("encrypt", json!({"text":signed,"recipients":[b]}))?["text"].clone();
+        let wrong = peer.raw(
+            "decrypt",
+            json!({"text":encrypted,"key_fingerprints":[a],"password":"alpha"}),
+        )?;
+        assert_eq!(wrong["ok"], false);
+        assert!(wrong.get("data").is_none());
+        let opened=peer.ok("decrypt",json!({"text":encrypted,"key_fingerprints":[b],"key_passwords":[{"fingerprint":b,"password":"beta"}]}))?;
+        assert_eq!(opened["decryption_keys"], json!([b]));
+        let final_text = peer.ok(
+            "verify",
+            json!({"text":opened["text"],"key_fingerprints":[a,b],"required_signers":[a,b]}),
+        )?;
+        assert_eq!(final_text["text"], "Multiple signer fixture");
+        let workflows = json!([{"name":"Switched keys","output_pattern":"{stem}-{index}.asc","steps":[{"operation":"sign","selection":"keys","fingerprints":[a,b],"require_all_signers":false},{"operation":"encrypt","selection":"keys","fingerprints":[b],"require_all_signers":false},{"operation":"decrypt","selection":"keys","fingerprints":[b],"require_all_signers":false},{"operation":"verify","selection":"keys","fingerprints":[a,b],"require_all_signers":true}]}]);
+        peer.ok(
+            "settings_set",
+            json!({"preferences":{"workflows":workflows}}),
+        )?;
+        let before = std::fs::read(&path)?;
+        let bad=peer.raw("settings_set",json!({"preferences":{"workflows":[{"name":"bad","steps":["sign"],"output_pattern":"../../{name}"}]}}))?;
+        assert_eq!(bad["ok"], false);
+        assert_eq!(std::fs::read(&path)?, before);
+        let target = dir.path().join("converted");
+        peer.ok("convert_copy",json!({"path":target,"format":if format=="age"{"kdbx"}else{"age"},"password":"portable"}))?;
+        let mut copy = Peer::new()?;
+        copy.ok("open", json!({"path":target,"password":"portable"}))?;
+        assert_eq!(
+            copy.ok("settings_get", json!({}))?["preferences"]["workflows"],
+            workflows
+        );
+    }
+    Ok(())
+}

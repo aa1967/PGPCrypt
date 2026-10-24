@@ -56,6 +56,7 @@
 #include "external_files.h"
 #include "subkey_planner.h"
 #include "workflow_editor.h"
+#include "automation_files.h"
 #include <QScreen>
 #include <QRegularExpression>
 #include <QTabWidget>
@@ -426,6 +427,13 @@ private:
     QStringList pendingActivity;
     bool workflowRunning=false, expectedTestError=false;
     QComboBox* workflowChoice=nullptr;
+    WorkflowEditor* workflowEditor=nullptr;
+    QComboBox* workflowSource=nullptr;
+    QList<QPointer<QDialog>> jobWindows;
+    qint64 retainedJobBytes=0;
+    struct BatchJob {QString inputPath,outputPath;};
+    struct BatchRun {QJsonObject preset,context;QList<BatchJob> jobs;int index=0,success=0,failed=0;bool continueOnError=true,stopRequested=false;std::function<void()> after;};
+    std::shared_ptr<BatchRun> activeBatch;
     QPlainTextEdit* activityWelcome=nullptr;
     QJsonObject outputProof;
     QByteArray outputProofDigest;
@@ -437,6 +445,8 @@ private:
         int index=0;
         bool fromOutput=false, originalEncrypted=false;
         std::function<void()> after;
+        std::function<void(bool,const QJsonObject&)> completion;
+        bool batch=false;
     };
     std::shared_ptr<WorkflowRun> activeWorkflow;
 
@@ -507,6 +517,7 @@ private:
         if(replyData.contains("key")) activityDetails.append(activityKey(replyData.value("key").toObject()));
         for(const auto& value:replyData.value("decryption_keys").toArray()) activityDetails.append(activityKey(keyRecord(value.toString())));
         if(replyData.contains("title")) activityDetails.append("Document: "+SafeActivityLog::field(replyData.value("title").toString()));
+        for(const auto& fp:replyData.value("signing_keys").toArray()) activityDetails.append(activityKey(keyRecord(fp.toString())));
         if(replyData.contains("added")) activityDetails.append("Subkeys added: "+QString::number(replyData.value("added").toInt()));
         if(!ok) activityDetails.append(activityReason(response.value("diagnostic").toString(),code));
         if(completedOperation=="open" && !ok) ++failedOpens;
@@ -518,7 +529,7 @@ private:
         updateSessionStats();
         if (!ok && code!="password_required" && code!="vault_auth_required" && code!="verification_failed") fail(response.value("error").toString("Operation failed"));
         else statusBar()->showMessage("Ready");
-        auto data=response.value("data").toObject(); if(!ok) data.insert("_error_code",code);
+        auto data=response.value("data").toObject(); if(!ok) {data.insert("_error_code",code);data.insert("_required_key",response.value("required_key"));}
         if (callback) callback(ok,data);
         updateVaultSubmit();
     }
@@ -528,7 +539,7 @@ private:
         ending = true;
         if(verificationPopup) {verificationPopup->close(); verificationPopup.clear();}
         if(notepadWindow) notepadWindow->hide();
-        workflowRunning=false; activeWorkflow.reset(); outputProof={}; outputProofDigest.clear(); if(activityWelcome) activityWelcome->clear(); if(sessionStats) sessionStats->clear();
+        workflowRunning=false; activeWorkflow.reset(); activeBatch.reset(); for(auto& window:jobWindows) if(window) {for(auto* text:window->findChildren<QPlainTextEdit*>()) text->clear();window->close();} jobWindows.clear(); retainedJobBytes=0; outputProof={}; outputProofDigest.clear(); if(activityWelcome) activityWelcome->clear(); if(sessionStats) sessionStats->clear();
         if(activityLog) {activityLog->clear();} if(activityDock) {activityDock->hide();}
         idle.stop(); rpcServer.close(); if(!rpcPath.isEmpty()) {QLocalServer::removeServer(rpcPath); rpcPath.clear();}
         activityClearTimer.stop(); clipboardTimer.stop(); selectionTimer.stop();
@@ -807,8 +818,8 @@ private:
         auto* navigation=new QWidget; auto* navLayout=new QVBoxLayout(navigation); navLayout->setContentsMargins(0,0,8,0); navLayout->setSpacing(10);
         navigation->setMinimumWidth(140); navigation->setMaximumWidth(170);
         auto* buttonGroup=new QButtonGroup(this); buttonGroup->setExclusive(true);
-        for(const auto& name:QStringList{"Keys","Notepad","Identities","Saved notes","Vault settings"}) {
-            auto* button=new QPushButton(name); button->setCheckable(true); button->setMinimumHeight(70); button->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Expanding);
+        for(const auto& name:QStringList{"Keys","Notepad","Identities","Saved notes","Automation","Vault settings"}) {
+            auto* button=new QPushButton(name); button->setCheckable(true); button->setMinimumHeight(58); button->setSizePolicy(QSizePolicy::Expanding,QSizePolicy::Expanding);
             button->setStyleSheet("QPushButton { font-size: 15px; font-weight: 600; border-radius: 7px; padding: 12px; } QPushButton:checked { background: palette(highlight); color: palette(highlighted-text); }");
             buttonGroup->addButton(button,navigationButtons.size()); navigationButtons.append(button); navLayout->addWidget(button,1);
         }
@@ -817,7 +828,7 @@ private:
         profileTabs=new QTabBar; profileTabs->setExpanding(false); profileTabs->setUsesScrollButtons(true); profileTabs->setDrawBase(true); profileTabs->addTab("All"); profileTabs->setTabData(0,QString()); profileTabs->addTab("+");
         contentLayout->addWidget(profileTabs);
         tabs = new QTabWidget; tabs->tabBar()->hide();
-        buildKeys(); buildText(); buildIdentities(); buildSavedNotes(); buildSettingsPage();
+        buildKeys(); buildText(); buildIdentities(); buildSavedNotes(); buildAutomation(); buildSettingsPage();
         contentLayout->addWidget(tabs,1); body->addWidget(content,1);
         connect(buttonGroup,&QButtonGroup::idClicked,tabs,&QTabWidget::setCurrentIndex);
         connect(tabs,&QTabWidget::currentChanged,this,[this](int index) {
@@ -826,7 +837,7 @@ private:
             if(index==1) {configureNotepad(); showNotepad(); updateSelection(); QTimer::singleShot(0,this,[this] {if(unlocked && !pending && tabs->currentIndex()==1) refreshDocuments();});}
             if(index==2) populateProfileManager();
             if(index==3) QTimer::singleShot(0,this,[this] {if(unlocked && !pending && tabs->currentIndex()==3) refreshDocuments();});
-            if(index==4) QTimer::singleShot(0,this,[this] {if(unlocked && !pending && tabs->currentIndex()==4) refreshProtectionStatus();});
+            if(index==5) QTimer::singleShot(0,this,[this] {if(unlocked && !pending && tabs->currentIndex()==5) refreshProtectionStatus();});
         });
         connect(profileTabs,&QTabBar::currentChanged,this,[this](int index) {
             if(index<0) return;
@@ -842,6 +853,12 @@ private:
         layout->addWidget(workspaceBody,1);
         sessionWarning = new QLabel; sessionWarning->setWordWrap(true); layout->addWidget(sessionWarning);
         applyPreferences({}); root->addWidget(sessionPage);
+    }
+
+    void buildAutomation() {
+        auto* page=new QWidget;auto* layout=new QVBoxLayout(page);auto* title=new QLabel("Automation");title->setStyleSheet("font-size: 20px; font-weight: 600;");layout->addWidget(title);workflowEditor=new WorkflowEditor;layout->addWidget(workflowEditor,1);vaultMutationControls.append(workflowEditor);
+        workflowEditor->onSave=[this](const QJsonArray& presets){auto value=preferences;value.insert("workflows",presets);request("settings_set",{{"preferences",value}},[this](bool ok,const QJsonObject& data){if(ok){workflowEditor->load(data.value("preferences").toObject().value("workflows").toArray(),true);applyPreferences(data.value("preferences").toObject());statusBar()->showMessage("Workflows saved inside this vault.");}});};
+        auto* hint=new QLabel("Load a saved workflow in Notepad, choose Input, Output or Batch files, then Execute. Batch setup previews every destination. Each completed job opens a separate result window.");hint->setWordWrap(true);layout->addWidget(hint);tabs->addTab(page,"Automation");
     }
 
     void buildSettingsPage() {
@@ -1053,6 +1070,7 @@ private:
     void syncBusyUi() {
         const bool enabled=!pending && !workflowRunning && !ending;
         tabs->setEnabled(enabled); if(workspaceBody) workspaceBody->setEnabled(enabled); if(notepadPage) notepadPage->setEnabled(enabled); if(notepadProfileTabs) notepadProfileTabs->setEnabled(enabled);
+        if(!activeBatch) for(const auto& window:jobWindows) if(window) for(auto* button:window->findChildren<QPushButton*>()) if(button->property("batchStop").toBool()) button->setEnabled(false);
     }
     QString activityKey(const QJsonObject& key) const {
         const auto fp=key.value("fingerprint").toString();
@@ -1064,6 +1082,7 @@ private:
         if(operation!="encrypt" && operation!="decrypt" && fields.contains("fingerprint")) {
             auto key=keyRecord(fields.value("fingerprint").toString()); if(key.isEmpty()) key.insert("fingerprint",fields.value("fingerprint")); const auto label=activityKey(key); if(!label.isEmpty()) details.append(label);
         }
+        for(const auto& field:QStringList{"signing_keys","key_fingerprints"}) for(const auto& fp:fields.value(field).toArray()){const auto label=activityKey(keyRecord(fp.toString()));if(!label.isEmpty())details.append(label);}
         if(operation=="encrypt") for(const auto& fp:fields.value("recipients").toArray()) {const auto label=activityKey(keyRecord(fp.toString())); if(!label.isEmpty()) details.append(label);}
         if(operation.startsWith("document_")) {
             QString title=fields.value("title").toString(); const auto id=fields.value("document_id").toString();
@@ -1450,7 +1469,7 @@ private:
         request("list",{},[this,after](bool ok,const QJsonObject& data) {
             if(!ok) return;
             cachedKeys=data.value("keys").toArray(); profiles=data.value("profiles").toArray(); profileDocumentCounts=data.value("profile_document_counts").toObject(); defaultSigner=data.value("default_signing_key").toString();
-            rebuildProfileTabs(); renderKeys(); populateProfileManager(); applyReadOnlyUi(); updateSessionStats();
+            rebuildProfileTabs(); renderKeys(); populateProfileManager(); applyReadOnlyUi(); updateSessionStats(); if(workflowEditor) workflowEditor->setKeys(cachedKeys);
             if(after) after();
         });
     }
@@ -1672,20 +1691,14 @@ private:
         documentContext=new QLabel("Unsaved text — stored only when you choose Save in vault."); documentContext->setTextFormat(Qt::PlainText); documentContext->setWordWrap(true); textLayout->addWidget(documentContext);
         input=editor("Paste text or import a message. Nothing is saved automatically…"); output=editor("Result appears here after the operation succeeds…",true);
         auto* inputPanel=new QWidget; auto* inputLayout=new QVBoxLayout(inputPanel); inputLayout->setContentsMargins(0,0,0,0); inputLayout->setSpacing(4);
-        auto* inputHeading=new QHBoxLayout; auto* inputLabel=new QLabel("Input"); inputLabel->setStyleSheet("font-weight: 600;"); inputHeading->addWidget(inputLabel); inputHeading->addStretch(); pasteInput=new QPushButton("Paste"); inputHeading->addWidget(pasteInput); inputLayout->addLayout(inputHeading); inputLayout->addWidget(input,1);
-        connect(pasteInput,&QPushButton::clicked,this,[this] {input->setPlainText(qApp->clipboard()->text());});
-        pasteInput->setText("Replace with clipboard"); pasteInput->setToolTip("Replaces all Input text with the current clipboard.");
-        auto* outputPanel=new QWidget; auto* outputLayout=new QVBoxLayout(outputPanel); outputLayout->setContentsMargins(0,0,0,0); outputLayout->setSpacing(4);
-        auto* outputHeading=new QHBoxLayout; auto* outputLabel=new QLabel("Output"); outputLabel->setStyleSheet("font-weight: 600;"); outputHeading->addWidget(outputLabel); outputHeading->addStretch(); copyOutput=new QPushButton("Copy all"); outputHeading->addWidget(copyOutput); outputLayout->addLayout(outputHeading);
-        for(const auto& operation:QStringList{"encrypt","verify"}) {auto* button=new QPushButton(operation=="encrypt"?"Encrypt output":"Verify output"); button->setObjectName(operation+"Output"); button->setEnabled(false); outputActions.append(button); outputHeading->insertWidget(outputHeading->count()-1,button); connect(button,&QPushButton::clicked,this,[this,operation] {textAction(operation,{},true);});}
-        connect(output,&QPlainTextEdit::textChanged,this,[this] {outputProof={}; outputProofDigest.clear(); for(auto* button:outputActions) button->setEnabled(!output->toPlainText().isEmpty());});
-        verificationIdentity=new QLabel; verificationIdentity->setTextFormat(Qt::PlainText); verificationIdentity->setWordWrap(true); verificationIdentity->setTextInteractionFlags(Qt::TextSelectableByMouse); verificationIdentity->hide(); outputLayout->addWidget(verificationIdentity); outputLayout->addWidget(output,1);
-        copyOutput->setEnabled(false); connect(output,&QPlainTextEdit::textChanged,copyOutput,[this] {copyOutput->setEnabled(!output->toPlainText().isEmpty());}); connect(copyOutput,&QPushButton::clicked,this,[this] {copySessionText(output->toPlainText()); statusBar()->showMessage("Output copied. Clipboard managers may retain it.");});
-        auto* panes=new QSplitter(Qt::Vertical); panes->addWidget(inputPanel); panes->addWidget(outputPanel); panes->setChildrenCollapsible(false); textLayout->addWidget(panes,1); workspace->addWidget(textWorkspace); workspace->setStretchFactor(1,1); workspace->setSizes({350,700}); sectionSplitter->addWidget(workspace); sectionSplitter->setStretchFactor(1,2); sectionSplitter->setSizes({230,400}); layout->addWidget(sectionSplitter,1);
-        auto* workflowBar=new QHBoxLayout; workflowChoice=new QComboBox; workflowChoice->setObjectName("notepadWorkflow"); workflowChoice->setMinimumContentsLength(18); auto* workflowSource=new QComboBox; workflowSource->addItems({"From Input","From Output"}); auto* run=new QPushButton("Run workflow"); auto* manageWorkflows=new QPushButton("Edit workflows…"); workflowBar->addWidget(workflowChoice,1); workflowBar->addWidget(workflowSource); workflowBar->addWidget(run); workflowBar->addWidget(manageWorkflows); layout->addLayout(workflowBar); vaultMutationControls.append(manageWorkflows);
-        connect(run,&QPushButton::clicked,this,[this,workflowSource] {runWorkflow(workflowSource->currentIndex()==1);}); connect(manageWorkflows,&QPushButton::clicked,this,[this] {if(!unlocked || pending || workflowRunning || sessionReadOnly) return; bool accepted=false; const auto edited=editWorkflows(this,preferences.value("workflows").toArray(),&accepted); if(!accepted || ending) return; auto value=preferences; value.insert("workflows",edited); request("settings_set",{{"preferences",value}},[this](bool ok,const QJsonObject& data) {if(ok) applyPreferences(data.value("preferences").toObject());});});
-        auto* actions=new QHBoxLayout; for(const auto& name:QStringList{"Encrypt","Decrypt","Sign","Verify"}) {auto* button=new QPushButton(name); actions->addWidget(button); connect(button,&QPushButton::clicked,this,[this,name] {textAction(name.toLower());});}
-        auto* clear=new QPushButton("Clear"); actions->addWidget(clear); connect(clear,&QPushButton::clicked,this,[this] {input->clear(); output->clear(); outputIsEncrypted=false; clearVerificationIdentity(); currentDocumentId.clear(); currentDocumentTitle.clear(); updateDocumentContext();}); layout->addLayout(actions);
+        auto* inputHeading=new QHBoxLayout; inputHeading->addWidget(new QLabel("Input"));inputHeading->addStretch();pasteInput=new QPushButton("Paste");pasteInput->setToolTip("Replace all Input with clipboard text.");inputHeading->addWidget(pasteInput);inputLayout->addLayout(inputHeading);connect(pasteInput,&QPushButton::clicked,this,[this]{input->setPlainText(qApp->clipboard()->text());});
+        auto* outputPanel=new QWidget;auto* outputLayout=new QVBoxLayout(outputPanel);outputLayout->setContentsMargins(0,0,0,0);outputLayout->setSpacing(4);auto* outputHeading=new QHBoxLayout;outputHeading->addWidget(new QLabel("Output"));outputHeading->addStretch();copyOutput=new QPushButton("Copy all");outputHeading->addWidget(copyOutput);outputLayout->addLayout(outputHeading);
+        for(int source=0;source<2;++source){auto* actions=new QHBoxLayout;for(const auto& op:QStringList{"sign","verify","encrypt","decrypt"}) {auto* button=new QPushButton(op[0].toUpper()+op.mid(1));button->setObjectName(op+(source?"Output":"Input"));actions->addWidget(button);connect(button,&QPushButton::clicked,this,[this,op,source]{textAction(op,{},source==1);});if(source){button->setEnabled(false);outputActions.append(button);}}(source?outputLayout:inputLayout)->addLayout(actions);}
+        inputLayout->addWidget(input,1);verificationIdentity=new QLabel;verificationIdentity->setTextFormat(Qt::PlainText);verificationIdentity->setWordWrap(true);verificationIdentity->setTextInteractionFlags(Qt::TextSelectableByMouse);verificationIdentity->hide();outputLayout->addWidget(verificationIdentity);outputLayout->addWidget(output,1);
+        connect(output,&QPlainTextEdit::textChanged,this,[this]{outputProof={};outputProofDigest.clear();for(auto* button:outputActions)button->setEnabled(!output->toPlainText().isEmpty());copyOutput->setEnabled(!output->toPlainText().isEmpty());});copyOutput->setEnabled(false);connect(copyOutput,&QPushButton::clicked,this,[this]{copySessionText(output->toPlainText());statusBar()->showMessage("Output copied. Clipboard managers may retain it.");});
+        auto* panes=new QSplitter(Qt::Horizontal);panes->setObjectName("notepadPanes");panes->addWidget(inputPanel);panes->addWidget(outputPanel);panes->setChildrenCollapsible(false);panes->setSizes({450,450});textLayout->addWidget(panes,1);workspace->addWidget(textWorkspace);workspace->setStretchFactor(1,1);workspace->setSizes({210,850});sectionSplitter->addWidget(workspace);sectionSplitter->setStretchFactor(1,2);sectionSplitter->setSizes({220,430});layout->addWidget(sectionSplitter,1);
+        auto* workflowBar=new QHBoxLayout;workflowChoice=new QComboBox;workflowChoice->setObjectName("notepadWorkflow");workflowChoice->setMinimumContentsLength(18);workflowSource=new QComboBox;workflowSource->addItems({"Input","Output","Batch files…"});auto* run=new QPushButton("Execute");run->setObjectName("executeWorkflow");workflowBar->addWidget(new QLabel("Workflow"));workflowBar->addWidget(workflowChoice,1);workflowBar->addWidget(workflowSource);workflowBar->addWidget(run);auto* clear=new QPushButton("Clear");workflowBar->addWidget(clear);layout->addLayout(workflowBar);
+        connect(run,&QPushButton::clicked,this,[this]{if(workflowSource->currentIndex()==2) prepareBatch();else runWorkflow(workflowSource->currentIndex()==1);});connect(clear,&QPushButton::clicked,this,[this]{input->clear();output->clear();outputIsEncrypted=false;clearVerificationIdentity();currentDocumentId.clear();currentDocumentTitle.clear();updateDocumentContext();});
         auto* files=new QHBoxLayout; auto* saveOutput=new QPushButton("Save output…"); auto* saveInput=new QPushButton("Save input…"); auto* importFile=new QPushButton("Import text file…"); auto* exportFile=new QPushButton("Export output…"); files->addWidget(saveOutput); files->addWidget(saveInput); files->addWidget(importFile); files->addWidget(exportFile); layout->addLayout(files);
         saveOutput->setProperty("requiresOutput",true); vaultMutationControls.append(saveOutput); vaultMutationControls.append(saveInput); saveOutput->setEnabled(false); exportFile->setEnabled(false); connect(output,&QPlainTextEdit::textChanged,saveOutput,[this,saveOutput,exportFile] {const bool has=!output->toPlainText().isEmpty(); saveOutput->setEnabled(has && !sessionReadOnly); exportFile->setEnabled(has);});
         connect(saveOutput,&QPushButton::clicked,this,[this] {saveVaultDocument(false);}); connect(saveInput,&QPushButton::clicked,this,[this] {saveVaultDocument(true);});
@@ -1971,48 +1984,147 @@ private:
     }
     void refreshWorkflowChoices() {
         if(!workflowChoice) return;
+        if(workflowEditor) workflowEditor->load(preferences.value("workflows").toArray());
         const auto selected=workflowChoice->currentText(); QSignalBlocker block(workflowChoice); workflowChoice->clear();
         for(const auto& value:preferences.value("workflows").toArray()) {const auto preset=value.toObject(); workflowChoice->addItem(preset.value("name").toString(),preset);}
         if(workflowChoice->count()==0) {workflowChoice->addItem("Create a workflow…",QJsonObject());} else workflowChoice->setCurrentIndex(qMax(0,workflowChoice->findText(selected)));
     }
+    QJsonObject stepContext(const QJsonValue& value,const QJsonObject& inherited,QString* error) const {
+        const auto step=workflowStep(value);const auto op=step.value("operation").toString();auto fields=inherited;
+        if(!QStringList{"sign","verify","encrypt","decrypt"}.contains(op)){*error="Unsupported operation in workflow.";return {};}
+        const auto mode=step.value("selection").toString("notepad");
+        if(mode=="keys") {
+            const auto selected=step.value("fingerprints").toArray();if(selected.isEmpty() || selected.size()>16){*error="Every explicit step needs 1–16 keys.";return {};}
+            QSet<QString> unique;for(const auto& value:selected){const auto fp=value.toString();const auto key=keyRecord(fp);if(key.isEmpty() || unique.contains(fp)){*error="A workflow key is missing or duplicated. Edit the workflow.";return {};}unique.insert(fp);if((op=="sign"&&!key.value("can_sign").toBool()) || (op=="encrypt"&&!key.value("can_encrypt").toBool()) || (op=="decrypt"&&!key.value("has_secret").toBool())){*error="A selected key cannot perform the requested operation. Check its secret material, capabilities and expiry.";return {};}}
+            fields=QJsonObject{{"profile_id",""}};
+            if(op=="sign")fields.insert("signing_keys",selected);else if(op=="encrypt")fields.insert("recipients",selected);else {fields.insert("key_fingerprints",selected);if(op=="verify"&&step.value("require_all_signers").toBool())fields.insert("required_signers",selected);}
+        } else if(mode!="notepad") {*error="Unsupported key-selection mode.";return {};}
+        if(op=="sign"&&fields.value("fingerprint").toString().isEmpty()&&fields.value("signing_keys").toArray().isEmpty())*error="Choose a Notepad signing key or configure explicit signing keys.";
+        if(op=="encrypt"&&fields.value("recipients").toArray().isEmpty())*error="Check Notepad recipients or configure explicit recipient keys.";
+        return fields;
+    }
+    QString workflowError(const QJsonObject& preset,const QJsonObject& context) const {
+        const auto steps=preset.value("steps").toArray();if(steps.isEmpty()||steps.size()>32)return "Choose a workflow with 1–32 steps.";
+        for(int i=0;i<steps.size();++i){QString error;stepContext(steps[i],context,&error);if(!error.isEmpty())return "Step "+QString::number(i+1)+": "+error;}return {};
+    }
+    bool proofAllowed(const QJsonObject& proof,const QJsonObject& fields) const {
+        const auto details=proof.value("signer_details").toArray();if(details.isEmpty())return false;
+        const auto allowed=fields.value("key_fingerprints").toArray();QSet<QString> seen;const auto profileId=fields.value("profile_id").toString();
+        for(const auto& value:details){const auto fp=value.toObject().value("fingerprint").toString();if(keyRecord(fp).isEmpty()||(!allowed.isEmpty()&&!allowed.contains(fp)))return false;if(!profileId.isEmpty()){bool found=false;for(const auto& profile:profiles){const auto p=profile.toObject();if(p.value("id").toString()==profileId&&p.value("fingerprints").toArray().contains(fp))found=true;}if(!found)return false;}seen.insert(fp);}
+        for(const auto& fp:fields.value("required_signers").toArray()) {if(!seen.contains(fp.toString()))return false;}
+        return true;
+    }
     void runWorkflow(bool fromOutput,std::function<void()> after={}) {
-        if(!unlocked || pending || workflowRunning || ending) return;
-        const auto preset=workflowChoice->currentData().toJsonObject(); const auto steps=preset.value("steps").toArray();
-        if(steps.isEmpty() || steps.size()>8) {fail("Create a workflow with 1–8 steps first."); return;}
-        const auto context=messageContext();
-        for(const auto& value:steps) {const auto op=value.toString(); if(!QStringList{"encrypt","decrypt","sign","verify"}.contains(op)) {fail("Unsupported workflow step."); return;} if(op=="sign" && context.value("fingerprint").toString().isEmpty()) {fail("Select a signing key before running this workflow."); return;} if(op=="encrypt" && context.value("recipients").toArray().isEmpty()) {fail("Select encryption recipients before running this workflow."); return;}}
-        auto state=std::make_shared<WorkflowRun>(); state->name=preset.value("name").toString(); state->steps=steps; state->context=context; state->text=fromOutput?output->toPlainText():input->toPlainText(); state->originalOutput=output->toPlainText(); state->originalEncrypted=outputIsEncrypted; state->fromOutput=fromOutput; state->after=std::move(after); if(fromOutput && outputHasProof()) state->proof=outputProof;
-        if(state->text.isEmpty()) {fail("Choose nonempty Input or Output before running a workflow."); return;}
-        activeWorkflow=state; workflowRunning=true; syncBusyUi(); clearVerificationIdentity(); if(!fromOutput) output->clear(); continueWorkflow(state);
+        if(!unlocked||pending||workflowRunning||ending)return;
+        const auto preset=workflowChoice->currentData().toJsonObject();const auto context=messageContext();const auto error=workflowError(preset,context);if(!error.isEmpty()){fail(error);return;}
+        auto state=std::make_shared<WorkflowRun>();state->name=preset.value("name").toString();state->steps=preset.value("steps").toArray();state->context=context;state->text=fromOutput?output->toPlainText():input->toPlainText();state->originalOutput=output->toPlainText();state->originalEncrypted=outputIsEncrypted;state->fromOutput=fromOutput;state->after=std::move(after);if(fromOutput&&outputHasProof())state->proof=outputProof;
+        if(state->text.isEmpty()){fail("Choose nonempty Input or Output.");return;}
+        activeWorkflow=state;workflowRunning=true;syncBusyUi();clearVerificationIdentity();if(!fromOutput)output->clear();continueWorkflow(state);
     }
     void continueWorkflow(const std::shared_ptr<WorkflowRun>& state) {
-        if(ending || !unlocked || activeWorkflow!=state) return;
+        if(ending||!unlocked||activeWorkflow!=state)return;
         if(state->index>=state->steps.size()) {
-            workflowRunning=false; activeWorkflow.reset(); syncBusyUi(); auto result=state->lastResult; result.insert("text",state->text); publishMessage(state->steps.last().toString(),result,"Workflow message"); if(activityLog) activityLog->record(ActivityEvent::OperationComplete,{"Workflow: "+state->name,"All "+QString::number(state->steps.size())+" steps completed."}); statusBar()->showMessage("Workflow completed: "+state->name); if(state->after) state->after(); return;
+            activeWorkflow.reset();auto result=state->lastResult;result.insert("text",state->text);
+            if(state->batch){if(state->completion)state->completion(true,result);return;}
+            workflowRunning=false;syncBusyUi();publishMessage(workflowOperation(state->steps.last()),result,"Workflow message");if(activityLog)activityLog->record(ActivityEvent::OperationComplete,{"Workflow: "+state->name,"All "+QString::number(state->steps.size())+" steps completed."});statusBar()->showMessage("Workflow completed: "+state->name);if(state->after)state->after();return;
         }
-        const auto operation=state->steps[state->index].toString(); statusBar()->showMessage("Workflow "+state->name+": step "+QString::number(state->index+1)+" / "+QString::number(state->steps.size())+" — "+operation+". Lock to cancel.");
-        auto completed=[this,state,operation](bool ok,const QJsonObject& data) {
-            if(ending || !unlocked || activeWorkflow!=state) return;
-            if(!ok) {workflowRunning=false; activeWorkflow.reset(); syncBusyUi(); if(state->fromOutput) {output->setPlainText(state->originalOutput); outputIsEncrypted=state->originalEncrypted;} else output->clear(); clearVerificationIdentity(); if(operation=="verify") verificationFailure(state->fromOutput,state->originalOutput); if(activityLog) activityLog->record(ActivityEvent::OperationFailed,{"Workflow: "+state->name,"Stopped at step "+QString::number(state->index+1)+" ("+operation+"); no intermediate result saved."}); statusBar()->showMessage("Workflow stopped: "+state->name+". No intermediate result saved."); if(state->after) state->after(); return;}
-            state->text=data.value("text").toString(); state->lastResult=data; state->proof={}; if((operation=="verify" || operation=="decrypt") && !data.value("signer_details").toArray().isEmpty()) state->proof={{"signers",data.value("signers")},{"signer_details",data.value("signer_details")}};
-            if(operation=="verify" && activityLog && state->index+1<state->steps.size()) activityLog->record(ActivityEvent::VerificationPassed,signerActivity(data));
-            ++state->index; continueWorkflow(state);
+        const auto operation=workflowOperation(state->steps[state->index]);QString configurationError;auto fields=stepContext(state->steps[state->index],state->context,&configurationError);
+        statusBar()->showMessage("Workflow "+state->name+": step "+QString::number(state->index+1)+" / "+QString::number(state->steps.size())+" — "+operation+". Lock to cancel.");
+        auto completed=[this,state,operation](bool ok,const QJsonObject& data){
+            if(ending||!unlocked||activeWorkflow!=state)return;
+            if(!ok){if(state->batch&&activeBatch&&data.value("_cancelled").toBool())activeBatch->stopRequested=true;activeWorkflow.reset();const auto reason="Stopped at step "+QString::number(state->index+1)+" ("+operation+"). No intermediate result saved.";if(activityLog)activityLog->record(ActivityEvent::OperationFailed,{"Workflow: "+state->name,reason});
+                if(state->batch){if(state->completion)state->completion(false,QJsonObject{{"reason",reason}});return;}
+                workflowRunning=false;syncBusyUi();if(state->fromOutput){output->setPlainText(state->originalOutput);outputIsEncrypted=state->originalEncrypted;}else output->clear();clearVerificationIdentity();if(operation=="verify")verificationFailure(state->fromOutput,state->originalOutput);statusBar()->showMessage(reason);if(state->after)state->after();return;
+            }
+            state->text=data.value("text").toString();state->lastResult=data;state->proof={};if((operation=="verify"||operation=="decrypt")&&!data.value("signer_details").toArray().isEmpty())state->proof=QJsonObject{{"signers",data.value("signers")},{"signer_details",data.value("signer_details")}};
+            if(operation=="verify"&&activityLog&&(state->batch||state->index+1<state->steps.size()))activityLog->record(ActivityEvent::VerificationPassed,signerActivity(data));
+            ++state->index;continueWorkflow(state);
         };
-        if(operation=="verify" && !state->proof.isEmpty()) {auto result=state->proof; result.insert("text",state->text); ++sessionOperations; completed(true,result); return;}
-        auto fields=state->context; fields.insert("text",state->text); performCrypto(operation,fields,completed);
+        if(!configurationError.isEmpty()){completed(false,{});return;}
+        if(operation=="verify"&&proofAllowed(state->proof,fields)){auto result=state->proof;result.insert("text",state->text);++sessionOperations;completed(true,result);return;}
+        fields.insert("text",state->text);performCrypto(operation,fields,completed);
     }
 
-    void performCrypto(const QString& operation,QJsonObject fields,Reply done,int attempt=0,QPointer<QLocalSocket> peer={},bool remoteCall=false) {
+    bool batchReserved(const QString& path) const {
+        const auto resolve=[](const QString& path){const QFileInfo file(path);return QDir(QFileInfo(file.absolutePath()).canonicalFilePath()).filePath(file.fileName());};
+        for(const auto& suffix:QStringList{"",".lock",".pgpcrypt-emergency",".pgpcrypt-dummy",".pgpcrypt-protection",".pgpcrypt-expiry"}) if(resolve(path)==resolve(activeVaultPath+suffix))return true;
+        return false;
+    }
+    AutomationFiles::Saved saveBatchFile(const QString& path,QByteArray bytes) {
+        if(batchReserved(path)){bytes.fill('\0');return {false,"This filename is reserved for the open vault or its support records."};}
+        return AutomationFiles::writeNew(path,bytes,preferences.value("allow_removable_media").toBool());
+    }
+
+    void prepareBatch() {
+        if(!unlocked||pending||workflowRunning||ending)return;
+        const auto preset=workflowChoice->currentData().toJsonObject();const auto context=messageContext();const auto error=workflowError(preset,context);if(!error.isEmpty()){fail(error);return;}
+        QFileDialog picker(this,"Choose batch message files",QDir::homePath());picker.setOption(QFileDialog::DontUseNativeDialog);picker.setOption(QFileDialog::DontResolveSymlinks);picker.setFileMode(QFileDialog::ExistingFiles);picker.setNameFilters({"Text and armored PGP messages (*.txt *.asc *.pgp)","All files (*)"});
+        if(!preferences.value("allow_removable_media").toBool()){picker.setProxyModel(new ExternalFileFilter(&picker));picker.setSidebarUrls({QUrl::fromLocalFile(QDir::homePath()),QUrl::fromLocalFile("/")});}
+        if(picker.exec()!=QDialog::Accepted||picker.selectedFiles().isEmpty())return;
+        const auto files=picker.selectedFiles();if(files.size()>64){fail("Choose at most 64 files per batch.");return;}
+        QDialog dialog(this);dialog.setWindowTitle("Preview batch — "+preset.value("name").toString());dialog.resize(920,600);auto* layout=new QVBoxLayout(&dialog);auto* hint=new QLabel("Each input is one independent job. Only its final successful result is saved; existing files are never overwritten. Every finished job opens a result window. Lock cancels remaining jobs; completed exports remain.");hint->setWordWrap(true);layout->addWidget(hint);
+        auto* form=new QFormLayout;auto* directory=new QLineEdit(QDir::homePath());auto* location=new QWidget;auto* locationLayout=new QHBoxLayout(location);locationLayout->setContentsMargins(0,0,0,0);auto* browse=new QPushButton("Browse…");locationLayout->addWidget(directory,1);locationLayout->addWidget(browse);form->addRow("Destination folder",location);auto* pattern=new QLineEdit(preset.value("output_pattern").toString("{stem}-{index}.processed"));form->addRow("Filename pattern",pattern);layout->addLayout(form);
+        auto* table=new QTableWidget(files.size(),2);table->setHorizontalHeaderLabels({"Input file","Destination filename — editable"});table->horizontalHeader()->setSectionResizeMode(QHeaderView::Interactive);table->horizontalHeader()->setStretchLastSection(true);table->setColumnWidth(0,360);for(int row=0;row<files.size();++row){auto* item=new QTableWidgetItem(QFileInfo(files[row]).fileName());item->setToolTip(files[row]);item->setFlags(item->flags()&~Qt::ItemIsEditable);table->setItem(row,0,item);table->setItem(row,1,new QTableWidgetItem);}layout->addWidget(table,1);
+        auto names=[&]{for(int row=0;row<files.size();++row)table->item(row,1)->setText(AutomationFiles::expand(pattern->text(),files[row],row+1,preset.value("name").toString()));};names();connect(pattern,&QLineEdit::textEdited,&dialog,names);
+        auto* tokens=new QLabel("Tokens: {stem}, {name}, {ext}, {index}, {workflow}. Text/armored messages only; Encrypt/Sign input is limited to 1 MiB, message files to 4 MiB. No plaintext temporary input files are created.");tokens->setWordWrap(true);layout->addWidget(tokens);
+        const bool encrypted=workflowOperation(preset.value("steps").toArray().last())=="encrypt";auto* disclosure=new QLabel(encrypted?"Final results are encrypted PGP messages. Destination filenames remain visible to the operating system.":"Final results may be readable text, signed text or key material outside vault encryption. Review the destination folder and filenames before executing.");disclosure->setWordWrap(true);layout->addWidget(disclosure);
+        auto* keepGoing=new QCheckBox("Continue with other files when a job fails");keepGoing->setChecked(true);layout->addWidget(keepGoing);auto* status=new QLabel;status->setTextFormat(Qt::PlainText);status->setWordWrap(true);layout->addWidget(status);
+        connect(browse,&QPushButton::clicked,&dialog,[&]{QFileDialog folder(&dialog,"Batch destination folder",directory->text());folder.setOption(QFileDialog::DontUseNativeDialog);folder.setOption(QFileDialog::DontResolveSymlinks);folder.setFileMode(QFileDialog::Directory);folder.setOption(QFileDialog::ShowDirsOnly);if(!preferences.value("allow_removable_media").toBool())folder.setProxyModel(new ExternalFileFilter(&folder));if(folder.exec()==QDialog::Accepted&&!folder.selectedFiles().isEmpty())directory->setText(folder.selectedFiles().first());});
+        QList<BatchJob> jobs;auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel);buttons->button(QDialogButtonBox::Ok)->setText("Execute batch");layout->addWidget(buttons);connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject);connect(buttons,&QDialogButtonBox::accepted,&dialog,[&]{
+            const auto folder=QFileInfo(directory->text()).canonicalFilePath();if(folder.isEmpty()||!QFileInfo(folder).isDir()){status->setText("Choose an existing destination folder.");return;}QSet<QString> targets;QList<BatchJob> planned;qint64 total=0;
+            for(int row=0;row<files.size();++row){const QFileInfo input(files[row]);const auto name=table->item(row,1)->text();const auto target=QDir(folder).filePath(name);if(!AutomationFiles::safeName(name)||targets.contains(target)||batchReserved(target)){status->setText("Every output needs a unique filename without folders or control characters.");return;}const auto encoded=QFile::encodeName(target);struct stat info{};if(::lstat(encoded.constData(),&info)==0||errno!=ENOENT){status->setText("Destination exists or cannot be inspected: "+name+". Choose a new name.");return;}if(!ExternalFilePolicy::allowed(files[row],preferences.value("allow_removable_media").toBool())||!ExternalFilePolicy::allowed(target,preferences.value("allow_removable_media").toBool())){status->setText("This batch includes a location blocked by the removable-media setting.");return;}if(input.size()<0||input.size()>AutomationFiles::MaxBytes){status->setText("Every input must be at most 4 MiB.");return;}total+=input.size();if(total>64*1024*1024){status->setText("Choose at most 64 MiB of input per batch.");return;}targets.insert(target);planned.append({input.absoluteFilePath(),target});}jobs=planned;dialog.accept();
+        });
+        if(dialog.exec()!=QDialog::Accepted||ending||!unlocked)return;
+        startBatch(preset,context,jobs,keepGoing->isChecked());
+    }
+    void startBatch(const QJsonObject& preset,const QJsonObject& context,const QList<BatchJob>& jobs,bool continueOnError,std::function<void()> after={}) {
+        if(jobs.isEmpty()||pending||workflowRunning||ending)return;
+        auto batch=std::make_shared<BatchRun>();batch->preset=preset;batch->context=context;batch->jobs=jobs;batch->continueOnError=continueOnError;batch->after=std::move(after);activeBatch=batch;workflowRunning=true;syncBusyUi();continueBatch(batch);
+    }
+    void continueBatch(const std::shared_ptr<BatchRun>& batch) {
+        if(ending||!unlocked||activeBatch!=batch||activeWorkflow)return;
+        if(batch->index>=batch->jobs.size()||batch->stopRequested) {const auto summary=QString("Batch complete: %1 succeeded, %2 failed, %3 skipped.").arg(batch->success).arg(batch->failed).arg(batch->jobs.size()-batch->success-batch->failed);activeBatch.reset();workflowRunning=false;syncBusyUi();statusBar()->showMessage(summary);if(activityLog)activityLog->record(ActivityEvent::OperationComplete,{summary});if(batch->after)batch->after();return;}
+        int visible=0;for(const auto& window:jobWindows)if(window)++visible;if(visible>=16||retainedJobBytes>28*1024*1024){statusBar()->showMessage("Batch paused: close a completed result window to continue (save any unsaved result before closing).");return;}
+        const auto job=batch->jobs[batch->index];QString text;const auto error=AutomationFiles::read(job.inputPath,preferences.value("allow_removable_media").toBool(),&text);
+        if(!error.isEmpty()){finishBatchJob(batch,false,QJsonObject{{"reason",error}});return;}
+        auto run=std::make_shared<WorkflowRun>();run->name=batch->preset.value("name").toString();run->steps=batch->preset.value("steps").toArray();run->context=batch->context;run->text=text;run->batch=true;run->completion=[this,batch](bool ok,const QJsonObject& result){finishBatchJob(batch,ok,result);};activeWorkflow=run;
+        if(activityLog)activityLog->record(ActivityEvent::TextLoaded,{"Batch job "+QString::number(batch->index+1)+" / "+QString::number(batch->jobs.size()),"File: "+SafeActivityLog::field(QFileInfo(job.inputPath).fileName())});
+        continueWorkflow(run);
+    }
+    void finishBatchJob(const std::shared_ptr<BatchRun>& batch,bool ok,QJsonObject result) {
+        if(ending||activeBatch!=batch)return;
+        const auto job=batch->jobs[batch->index];const bool encrypted=workflowOperation(batch->preset.value("steps").toArray().last())=="encrypt";const bool authenticated=ok;QString report=result.value("reason").toString();
+        if(ok){const auto saved=saveBatchFile(job.outputPath,result.value("text").toString().toUtf8());ok=saved.committed;report=saved.error.isEmpty()?"All steps succeeded. Final output saved.":saved.error;}
+        if(ok)++batch->success;else{++batch->failed;if(!authenticated){result.remove("text");result.remove("signer_details");}}
+        if(activityLog)activityLog->record(ok?ActivityEvent::DocumentSaved:ActivityEvent::OperationFailed,{"File: "+SafeActivityLog::field(QFileInfo(job.inputPath).fileName()),"Destination: "+SafeActivityLog::field(QFileInfo(job.outputPath).fileName()),report});
+        showBatchResult(job,batch->index+1,ok,result,report,encrypted,authenticated);++batch->index;
+        if(!ok&&!batch->continueOnError) {batch->index=batch->jobs.size();}
+        QTimer::singleShot(0,this,[this,batch]{continueBatch(batch);});
+    }
+    void showBatchResult(const BatchJob& job,int number,bool ok,const QJsonObject& result,const QString& report,bool encrypted,bool authenticated) {
+        auto* window=new QDialog(this);window->setObjectName("batchJobResult");window->setAttribute(Qt::WA_DeleteOnClose);window->setWindowTitle("Job "+QString::number(number)+(ok?" completed — ":" failed — ")+QFileInfo(job.inputPath).fileName());window->resize(780,520);auto* layout=new QVBoxLayout(window);auto* heading=new QLabel((ok?"COMPLETED — ":"FAILED — ")+report);heading->setTextFormat(Qt::PlainText);heading->setWordWrap(true);layout->addWidget(heading);auto* location=new QLabel("Input: "+QFileInfo(job.inputPath).fileName()+"\n"+(ok?"Saved to: ":"Requested destination: ")+job.outputPath);location->setTextFormat(Qt::PlainText);location->setWordWrap(true);layout->addWidget(location);
+        auto* body=editor({},true);body->setPlainText(authenticated?result.value("text").toString():QString());body->setUndoRedoEnabled(false);layout->addWidget(body,1);const auto bytes=body->toPlainText().toUtf8().size();retainedJobBytes+=bytes;
+        auto* actions=new QHBoxLayout;auto* copy=new QPushButton("Copy all");copy->setEnabled(authenticated);actions->addWidget(copy);connect(copy,&QPushButton::clicked,window,[body]{copySessionText(body->toPlainText());});auto* save=new QPushButton("Save another copy…");save->setEnabled(authenticated);actions->addWidget(save);connect(save,&QPushButton::clicked,window,[this,window,body,job,encrypted]{QFileDialog dialog(window,encrypted?"Save encrypted result":"Save readable result outside vault",job.outputPath);dialog.setOption(QFileDialog::DontUseNativeDialog);dialog.setOption(QFileDialog::DontResolveSymlinks);dialog.setAcceptMode(QFileDialog::AcceptSave);dialog.setOption(QFileDialog::DontConfirmOverwrite);if(!preferences.value("allow_removable_media").toBool())dialog.setProxyModel(new ExternalFileFilter(&dialog));if(dialog.exec()!=QDialog::Accepted||dialog.selectedFiles().isEmpty()||ending)return;const auto saved=saveBatchFile(dialog.selectedFiles().first(),body->toPlainText().toUtf8());QMessageBox::information(window,saved.committed?"Result saved":"Result not saved",saved.error.isEmpty()?"Saved a separate copy.":saved.error);});
+        if(authenticated&&!result.value("signer_details").toArray().isEmpty()){auto* verify=new QPushButton("Verified signers…");actions->addWidget(verify);connect(verify,&QPushButton::clicked,window,[this,window,result]{showVerificationDialog(window,true,result.value("signer_details").toArray(),cachedKeys,"Batch job signature");});}
+        auto* stop=new QPushButton("Stop after current job");stop->setProperty("batchStop",true);stop->setEnabled(activeBatch!=nullptr);actions->addWidget(stop);connect(stop,&QPushButton::clicked,window,[this,stop]{if(activeBatch){activeBatch->stopRequested=true;stop->setEnabled(false);statusBar()->showMessage("The batch will stop after the current job; remaining files will be skipped.");if(!activeWorkflow){auto batch=activeBatch;QTimer::singleShot(0,this,[this,batch]{continueBatch(batch);});}}});
+        auto* close=new QPushButton("Close");actions->addWidget(close);connect(close,&QPushButton::clicked,window,&QDialog::close);layout->addLayout(actions);jobWindows.removeIf([](const QPointer<QDialog>& item){return item.isNull();});jobWindows.append(window);
+        connect(window,&QObject::destroyed,this,[this,bytes]{retainedJobBytes=qMax<qint64>(0,retainedJobBytes-bytes);if(activeBatch&&!activeWorkflow&&!ending){auto batch=activeBatch;QTimer::singleShot(0,this,[this,batch]{continueBatch(batch);});}});window->show();
+    }
+
+    void performCrypto(const QString& operation,QJsonObject fields,Reply done,int attempt=0,QPointer<QLocalSocket> peer={},bool remoteCall=false,std::shared_ptr<QHash<QString,int>> tries={}) {
+        if(!tries) tries=std::make_shared<QHash<QString,int>>();
         if(remoteCall && (!peer || peer->state()!=QLocalSocket::ConnectedState)) {done(false,{}); return;}
-        request(operation,fields,[this,operation,fields,done,attempt,peer,remoteCall](bool ok,const QJsonObject& data) mutable {
+        request(operation,fields,[this,operation,fields,done,attempt,peer,remoteCall,tries](bool ok,const QJsonObject& data) mutable {
             const auto errorCode=data.value("_error_code").toString();
-            if(!ok && (errorCode=="password_required" || errorCode=="vault_auth_required") && attempt<6) {
-                const bool vaultAuth=errorCode=="vault_auth_required";
+            const auto needed=data.value("_required_key").toString();const auto promptKey=errorCode=="vault_auth_required"?QString("vault"):needed.isEmpty()?QString("private"):needed;
+            if(!ok && (errorCode=="password_required" || errorCode=="vault_auth_required") && tries->value(promptKey)<6) {
+                ++(*tries)[promptKey];
+                const bool vaultAuth=errorCode=="vault_auth_required";const auto requiredKey=needed;
                 bool accepted=true; QString pass;
                 if(testing) pass=vaultAuth?"disposable Qt fixture passphrase":testKdbx?"":"x";
                 else {
                     QDialog dialog(this); dialog.setWindowTitle(vaultAuth?"Confirm vault password":"Unlock private key");
-                    auto* form=new QFormLayout(&dialog); auto* prompt=new QLabel(vaultAuth?"Confirm the normal vault password to display unprotected private key material.":operation=="add_subkeys"?"Enter the primary private-key password to certify the complete subkey plan.":operation.contains("private_export")?"Enter the private-key password/passphrase. Export keeps its existing packet protection.":"Enter the private-key password/passphrase to complete this operation."); prompt->setWordWrap(true); form->addRow(prompt);
+                    auto* form=new QFormLayout(&dialog); if(!requiredKey.isEmpty()){auto* keyLabel=new QLabel(activityKey(keyRecord(requiredKey)));keyLabel->setTextFormat(Qt::PlainText);keyLabel->setWordWrap(true);form->addRow(keyLabel);} auto* prompt=new QLabel(vaultAuth?"Confirm the normal vault password to display unprotected private key material.":operation=="add_subkeys"?"Enter the primary private-key password to certify the complete subkey plan.":operation.contains("private_export")?"Enter the private-key password/passphrase. Export keeps its existing packet protection.":"Enter the private-key password/passphrase to complete this operation."); prompt->setWordWrap(true); form->addRow(prompt);
                     auto* entry=new QLineEdit; entry->setEchoMode(QLineEdit::Password); entry->setInputMethodHints(Qt::ImhSensitiveData|Qt::ImhNoPredictiveText|Qt::ImhNoAutoUppercase); form->addRow("Password/passphrase",entry);
                     auto* buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel); form->addRow(buttons);
                     connect(buttons,&QDialogButtonBox::accepted,&dialog,&QDialog::accept); connect(buttons,&QDialogButtonBox::rejected,&dialog,&QDialog::reject); connect(entry,&QLineEdit::returnPressed,&dialog,&QDialog::accept);
@@ -2020,8 +2132,8 @@ private:
                     if(remoteCall) {if(!peer || peer->state()!=QLocalSocket::ConnectedState) {done(false,{}); return;} connect(peer,&QLocalSocket::disconnected,&dialog,&QDialog::reject); connect(&timeout,&QTimer::timeout,&dialog,&QDialog::reject); timeout.start(60000);}
                     entry->setFocus(); accepted=dialog.exec()==QDialog::Accepted; pass=entry->text(); entry->clear();
                 }
-                if(!accepted || ending || (remoteCall && (!peer || peer->state()!=QLocalSocket::ConnectedState))) {statusBar()->showMessage("Operation cancelled"); done(false,{}); return;}
-                fields.insert(vaultAuth?"vault_password":"password",pass); pass.fill(QChar('\0')); performCrypto(operation,fields,done,attempt+1,peer,remoteCall); return;
+                if(!accepted || ending || (remoteCall && (!peer || peer->state()!=QLocalSocket::ConnectedState))) {statusBar()->showMessage("Operation cancelled"); done(false,QJsonObject{{"_cancelled",true}}); return;}
+                if(!vaultAuth&&!requiredKey.isEmpty()){auto credentials=fields.value("key_passwords").toArray();bool replaced=false;for(int i=0;i<credentials.size();++i)if(credentials[i].toObject().value("fingerprint").toString()==requiredKey){credentials[i]=QJsonObject{{"fingerprint",requiredKey},{"password",pass}};replaced=true;break;}if(!replaced)credentials.append(QJsonObject{{"fingerprint",requiredKey},{"password",pass}});fields.insert("key_passwords",credentials);}else fields.insert(vaultAuth?"vault_password":"password",pass); pass.fill(QChar('\0')); performCrypto(operation,fields,done,attempt+1,peer,remoteCall,tries); return;
             }
             if(!ok && (errorCode=="password_required" || errorCode=="vault_auth_required")) {if(activityLog) activityLog->record(ActivityEvent::OperationFailed,activityContext(operation,fields)+QStringList{activityReason({},errorCode)}); fail(operation.contains("private_export")?"Authorization failed. Export needs the password for every protected secret packet.":"Could not unlock the private key.");}
             done(ok,data);
@@ -2105,7 +2217,7 @@ private:
 
     void testSettingsAndQubes(std::function<void()> after) {
         if(!testReadOnlyControls() || !testNotepadWindow() || !testSafeActivity() || !testKeyCreationDefaults()) return;
-        if(autoLock || focusLock || sessionLock || clipboardSeconds!=0 || tabs->count()!=5 || navigationButtons.size()!=5) {fail("New-vault default settings or notes removal failed"); return;}
+        if(autoLock || focusLock || sessionLock || clipboardSeconds!=0 || tabs->count()!=6 || navigationButtons.size()!=6) {fail("New-vault default settings or notes removal failed"); return;}
         QEvent deactivate(QEvent::ApplicationDeactivate); QCoreApplication::sendEvent(qApp,&deactivate);
         if(ending) {fail("Focus loss locked with opt-in disabled"); return;}
         if(keys->contextMenuPolicy()!=Qt::CustomContextMenu || recipientChoices->contextMenuPolicy()!=Qt::CustomContextMenu || profileMembers->contextMenuPolicy()!=Qt::CustomContextMenu) {fail("Key quick-action menus are missing"); return;}
@@ -2350,11 +2462,31 @@ private:
                         runWorkflow(false,[this] {
                             if(workflowRunning || !tabs->isEnabled() || !output->toPlainText().isEmpty()) {fail("Failed workflow did not stop without publishing an intermediate result"); return;}
                             // Resume a valid result for the existing save/lock checks.
-                            input->setPlainText("Qt signature fixture"); textAction("sign",[this] {textAction("verify",[this] {testSavedMessageAndFinish();},true);});
+                            input->setPlainText("Qt signature fixture"); textAction("sign",[this] {textAction("verify",[this] {testAutomationBatch([this]{testSavedMessageAndFinish();});},true);});
                         });
                     },true);
                 },true);
             });
+        });
+    }
+
+    void testAutomationBatch(std::function<void()> after) {
+        const auto pane=findChild<QSplitter*>("notepadPanes");if(!pane||pane->orientation()!=Qt::Horizontal||!workflowEditor){fail("Automation page or side-by-side Notepad is missing");return;}
+        for(const auto& source:QStringList{"Input","Output"})for(const auto& op:QStringList{"sign","verify","encrypt","decrypt"})if(!findChild<QPushButton*>(op+source)){fail("A Notepad panel operation is missing");return;}
+        const auto folder=QDir::home().filePath("batch-fixtures");QDir().mkpath(folder);
+        auto write=[](const QString& path,const QByteArray& text){QFile file(path);return file.open(QIODevice::WriteOnly)&&file.write(text)==text.size();};
+        const auto first=folder+"/first.txt",second=folder+"/second.txt",bad=folder+"/bad.txt",existing=folder+"/existing.txt",link=folder+"/link.txt";
+        if(!write(first,"Batch first fixture")||!write(second,"Batch second fixture")||!write(bad,QByteArray("bad\0data",8))||!write(existing,"preserve existing")){fail("Could not create batch fixtures");return;}
+        if(AutomationFiles::writeNew(existing,"replace",true).committed||AutomationFiles::safeName("../escape")||AutomationFiles::expand("{unknown}",first,1,"x").size()!=0){fail("Batch output preflight permitted an unsafe name or overwrite");return;}
+        if(::symlink(QFile::encodeName(existing).constData(),QFile::encodeName(link).constData())!=0){fail("Could not create symbolic-link fixture");return;}if(AutomationFiles::writeNew(link,"replace",true).committed){fail("Batch output followed a symbolic link");return;}
+        QJsonArray steps;for(const auto& op:QStringList{"sign","encrypt","decrypt","verify"})steps.append(QJsonObject{{"operation",op},{"selection","keys"},{"fingerprints",QJsonArray{testFingerprint}},{"require_all_signers",op=="verify"}});
+        const QJsonObject preset{{"name","Batch fixture"},{"steps",steps},{"output_pattern","{stem}-{index}.txt"}};const auto oldInput=input->toPlainText(),oldOutput=output->toPlainText();
+        startBatch(preset,messageContext(),QList<BatchJob>{{first,folder+"/first.out"},{bad,folder+"/bad.out"},{second,folder+"/second.out"}},true,[this,after,folder,oldInput,oldOutput]{
+            QString a,b;const auto e1=AutomationFiles::read(folder+"/first.out",true,&a),e2=AutomationFiles::read(folder+"/second.out",true,&b);int complete=0,failed=0;for(const auto& window:jobWindows)if(window){auto* body=window->findChild<QPlainTextEdit*>();if(window->windowTitle().contains(" completed "))++complete;else{++failed;if(body&&!body->toPlainText().isEmpty()){fail("Failed batch job published plaintext");return;}}}
+            if(activeBatch||workflowRunning||!e1.isEmpty()||!e2.isEmpty()||a!="Batch first fixture"||b!="Batch second fixture"||QFileInfo::exists(folder+"/bad.out")||complete!=2||failed!=1||input->toPlainText()!=oldInput||output->toPlainText()!=oldOutput){fail("Batch jobs lost independent results, failed to continue or changed Notepad");return;}
+            if(QFileInfo(folder+"/first.out").permissions()&(QFileDevice::ReadGroup|QFileDevice::WriteGroup|QFileDevice::ReadOther|QFileDevice::WriteOther)){fail("Batch output permissions are not private");return;}
+            for(auto& window:jobWindows) {if(window)window->close();}
+            QTimer::singleShot(0,this,after);
         });
     }
 
