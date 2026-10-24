@@ -21,7 +21,7 @@ jobs:
           apt-get install -y -t trixie-backports rustc cargo rustfmt rust-clippy
           apt-get install -y --no-install-recommends git ca-certificates build-essential pkg-config \
             libssl-dev clang libclang-dev qt6-base-dev qt6-wayland \
-            python3 binutils dpkg-dev desktop-file-utils libsodium-dev libzxcvbn-dev age gnupg keepassxc
+            python3 binutils dpkg-dev desktop-file-utils libsodium-dev libzxcvbn-dev age gnupg keepassxc dbus-daemon
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - name: Check release version
         if: startsWith(github.ref, 'refs/tags/')

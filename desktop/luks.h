@@ -9,6 +9,7 @@
 #include <QDBusConnection>
 #include <QDBusError>
 #include <QDBusMessage>
+#include <QDBusMetaType>
 #include <QDBusObjectPath>
 #include <QDBusPendingCallWatcher>
 #include <QDBusUnixFileDescriptor>
@@ -150,7 +151,11 @@ public:
     // always uses the system bus and the well-known UDisks service name.
     explicit Service(QObject* parent, QDBusConnection connection = QDBusConnection::systemBus(),
                      QString name = "org.freedesktop.UDisks2")
-        : QObject(parent), bus(std::move(connection)), destination(std::move(name)) {}
+        : QObject(parent), bus(std::move(connection)), destination(std::move(name)) {
+        qDBusRegisterMetaType<QList<QByteArray>>();
+        qDBusRegisterMetaType<Interfaces>();
+        qDBusRegisterMetaType<Objects>();
+    }
 
     void call(const QString& path, const QString& interface, const QString& method,
               const QVariantList& args, std::function<void(const QDBusMessage&)> completed) {

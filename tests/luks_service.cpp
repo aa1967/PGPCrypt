@@ -61,6 +61,7 @@ public:
             require(message.arguments().at(0).toString().isEmpty(),"no password string argument");
             require(options.value("keyfile_contents").metaType().id()==QMetaType::QByteArray,"password is binary IPC data");
             if(wrongKey || options.value("keyfile_contents").toByteArray()!=QByteArray("test key")) {fail("Failed"); return true;}
+            objects[QDBusObjectPath(clear)][Luks::Block]["ReadOnly"]=options.value("read-only").toBool();
             objects[QDBusObjectPath(message.path())][Luks::Encrypted]["CleartextDevice"]=QVariant::fromValue(QDBusObjectPath(clear));
             ok({QVariant::fromValue(QDBusObjectPath(clear))}); return true;
         }
@@ -115,6 +116,8 @@ int main(int argc,char** argv) {
     require(await([&](auto done) {service.attach(reopened,false,[&](const QString& path,const QString& issue) {attached=path;done(issue);});}).isEmpty() && attached==fake.loop && fake.attachments==0,"reuse existing same-inode loop");
     require(await([&](auto done) {service.mount(fake.loop,"test key",true,done);}).isEmpty(),"unlock and mount existing container");
     require(fake.mountOptions.value("options").toString()=="ro,nosuid,nodev,noexec","read-only and restrictive mount flags");
+    require(await([&](auto done) {service.mount(fake.loop,{},true,done);}).isEmpty(),"reuse an already read-only mounted volume");
+    fake.objects[QDBusObjectPath(fake.clear)][Luks::Block]["ReadOnly"]=false;
     require(!await([&](auto done) {service.mount(fake.loop,{},true,done);}).isEmpty(),"do not claim read-only applied to existing writable device");
     fake.busy=true; fake.operations.clear();
     require(await([&](auto done) {service.closeVolume(fake.loop,done);}).contains("busy"),"busy unmount is reported");
