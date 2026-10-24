@@ -107,7 +107,7 @@ def main():
 
         terminal_command([age, "--decrypt", "--output", str(plaintext), str(original)])
         decoded = json.loads(plaintext.read_text())
-        assert decoded["application"] == "PGPCrypt" and decoded["schema"] == 9
+        assert decoded["application"] == "PGPCrypt" and decoded["schema"] == 10
         assert decoded["data"]["notes"] == "independent age compatibility fixture"
         assert decoded["data"]["preferences"]["notepad_popout"] is False
         assert len(decoded["data"]["certificates"]) == 1
@@ -141,7 +141,7 @@ def main():
         assert peer.request("document_get", document_id=document, profile_id=profile)["text"] == "Stored inside the age vault"
         peer.lock()
         # Recreate the previous age schemas using the independent writer.
-        for schema in (8, 7, 6, 5, 4, 3, 2, 1):
+        for schema in (9, 8, 7, 6, 5, 4, 3, 2, 1):
             previous_data = copy.deepcopy(decoded)
             previous_data["schema"] = schema
             previous_data["data"]["preferences"].pop("notepad_popout", None)
@@ -185,7 +185,7 @@ def main():
                 assert peer.request("profiles_list")["profiles"] == []
                 assert peer.request("documents_list")["documents"] == []
             peer.lock()
-    print("age interoperability passed: Rust vault -> Debian age -> Rust vault; profiles/documents and schemas 1/2/3/4/5/6/7/8/9")
+    print("age interoperability passed: Rust vault -> Debian age -> Rust vault; profiles/documents and schemas 1/2/3/4/5/6/7/8/9/10")
 
 
 if __name__ == "__main__":

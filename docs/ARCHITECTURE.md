@@ -183,3 +183,20 @@ bodies, passwords, raw errors and advanced-protection setup/outcomes remain
 excluded. Logs and optional window counters disappear when lock replaces the
 UI process. Inventory refresh uses existing collection caches, not repeated
 worker scans. No system journal integration or persistent login history is added.
+
+## Alpha15 per-step keys and batch exports
+
+Age schema 10 / KDBX settings schema 9 permit bounded declarative step objects
+and filename patterns. Per-step keys override inherited Notepad context explicitly;
+multi-signer packets use Sequoia's Signer with a shared unlock-work budget.
+Required-signer checks run after authentication and before any result is returned.
+Per-key password hints carry only the requested public fingerprint; credentials
+are zeroized in worker request/helper structures and never stored in presets.
+
+The single GUI thread queues independent UTF-8 file jobs against the same worker.
+Only a complete successful job can export its final result. Private same-folder
+output staging and atomic link-without-replacement prevent overwrites; held directory
+descriptors and no-follow opens enforce the final path boundary. Result windows
+share the unlocked session and close/clear on lock. Completed exports persist.
+Queue/window/data limits bound accumulation; no scripts, external commands or
+background triggers have been introduced. See WORKFLOWS.md for exact behavior.

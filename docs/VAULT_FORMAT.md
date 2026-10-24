@@ -1,4 +1,4 @@
-# Vault format: age v1 plus encrypted schema 9
+# Vault format: age v1 plus encrypted schema 10
 
 The outer container is the unmodified [age v1 format](https://age-encryption.org/v1),
 implemented by `age` 0.12.1. The app defines no crypto header, nonce format,
@@ -20,7 +20,7 @@ After complete authenticated decryption, the plaintext is UTF-8 JSON:
 ```json
 {
   "application": "PGPCrypt",
-  "schema": 9,
+  "schema": 10,
   "data": {
     "certificates": [],
     "notes": "",
@@ -59,19 +59,27 @@ does not apply it. `idle_timeout_seconds` ranges from 60 to 3600.
 Schema-1 vaults are read with empty revocations and a 300-second timeout.
 Schemas 1 and 2 default to no saved signing key. Schemas 1–3 default to all
 automatic locking, clipboard wiping and RPC options off. Every save writes
-schema 9 with encrypted preferences, identity fields, profiles and documents. Schemas 1–4
+schema 10 with encrypted preferences, identity fields, profiles and documents. Schemas 1–4
 default to empty profiles/documents. `default_signing_key` is empty for no
 default; inactivity duration remains 60–3600 seconds but has no effect until
 `preferences.auto_lock` is enabled. Clipboard delay is 0 (off) or 5–1800 seconds.
 Schemas 1–5 default missing identity fields to empty strings. Missing `preferences.notepad_popout` now defaults to false; explicitly stored
 values remain unchanged. Schema 8 adds optional activity/media/counter preferences;
 activity clearing is 0 or 5–3600 seconds and counters/media default off. The Notepad option controls
-window layout and adds no independent worker or copy of the editor state. Older PGPCrypt releases reject schema 9; preserve a backup before upgrading. Unknown fields and unsupported versions are rejected.
+window layout and adds no independent worker or copy of the editor state. Older PGPCrypt releases reject schema 10; preserve a backup before upgrading. Unknown fields and unsupported versions are rejected.
 Schema 9 adds `activity_welcome` (at most 16 lines / 2048 UTF-8 bytes) and
 `workflows` (at most 32 uniquely named presets, 1–8 steps each). Steps are only
 `sign`, `encrypt`, `decrypt` or `verify`; no commands, credentials, file actions or
 automatic triggers are accepted. Missing fields in older payloads default to an
 empty welcome and two built-in workflows; an explicit empty list stays empty.
+Schema 10 extends workflows to 1–32 steps. Each step is an earlier operation string
+or `{operation,selection,fingerprints,require_all_signers}`. Selection is `notepad`
+(with no fingerprints) or `keys` (1–16 unique uppercase full 40/64-hex fingerprints).
+Require-all applies only to explicit Verify steps. A preset also has an optional
+`output_pattern`, defaulting to `{stem}-{index}.processed` for older presets. Patterns
+are filenames up to 120 characters with only the documented tokens, no folders or
+controls. No passwords or actual input/destination paths are accepted in presets.
+Missing keys are reported at execution, not treated as vault corruption.
 The schema version is private, separate from the public age format version.
 
 The writer pads JSON with spaces to a 4096-byte boundary inside encryption.

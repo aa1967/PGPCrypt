@@ -53,3 +53,7 @@ Private-key passwords are requested only when needed, including empty passwords
 for imported packets that use one. They are not cached between operations. New
 passwords have no enforced minimum and a 128-Unicode-character limit; strength
 indicators help estimate guessability without establishing a security guarantee.
+
+Workflow definitions are edited on **Automation**, saved inside encryption and
+preserved during conversion. Batch input paths, destination folders, queue state
+and result windows last only for the current unlocked session.

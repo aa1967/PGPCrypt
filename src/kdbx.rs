@@ -261,7 +261,7 @@ pub fn open(bytes: &[u8], password: &str) -> Result<(VaultData, Database)> {
         .context("Missing settings schema")?
         .parse::<u32>()?;
     ensure!(
-        (1..=8).contains(&schema),
+        (1..=9).contains(&schema),
         "Unsupported PGPCrypt KDBX settings schema"
     );
     let mut data = VaultData::default();
@@ -821,7 +821,7 @@ pub fn write(
         let mut settings = db.entry_mut(id).context("Missing settings entry")?;
         settings.set_unprotected("Title", "Vault notes and settings");
         settings.set_unprotected(MARKER, "settings");
-        settings.set_unprotected(SCHEMA, "8");
+        settings.set_unprotected(SCHEMA, "9");
         settings.set_protected("PGPCrypt.Profiles", serde_json::to_string(&data.profiles)?);
         settings.set_protected(
             "PGPCrypt.Preferences",

@@ -55,7 +55,7 @@ packets inside the encrypted container; take care when copying those packets out
 
 The `Vault notes and settings` entry holds the protected `Notes` field and
 `PGPCrypt.IdleTimeoutSeconds`, plus protected `PGPCrypt.DefaultSigningKey`
-(empty means no default). The settings entry uses `PGPCrypt.Schema=8`; key
+(empty means no default). The settings entry uses `PGPCrypt.Schema=9`; key
 entries remain schema 1. Older settings are read with defaults for missing fields. Protected
 `PGPCrypt.Preferences` holds JSON for themes, locking, clipboard clearing and
 Qubes opt-in; all new automatic behaviors default off.
@@ -80,7 +80,7 @@ the identity when PGPCrypt opens it. The group contains:
   copy the armor from the canonical entry's Advanced fields.
 
 Unassigned saved documents remain in the PGPCrypt root. Older supported settings
-schemas 1–7 remain readable and migrate on save; managed entry IDs, supported
+schemas 1–8 remain readable and migrate on save; managed entry IDs, supported
 custom fields and history survive moves. Structural group/entry markers, IDs and
 reference targets must remain coherent. Unsupported new groups, misplaced
 identity entries, duplicate IDs or forged references are refused. PGPCrypt does
@@ -152,3 +152,8 @@ the two built-in workflows; an explicitly empty workflow list remains empty.
 These can be recovered by revealing/copying the protected JSON in KeePassXC.
 They do not change the standard KDBX container, key entry fields or identity
 groups. KeePassXC does not execute PGPCrypt workflows. See [WORKFLOWS.md](WORKFLOWS.md).
+
+Settings schema 9 extends the protected preferences JSON with structured workflow
+key selections, required signers and filename patterns. Existing string-only steps
+remain readable. These changes do not alter the standard KDBX crypto or canonical
+key/identity entries. Actual batch paths and passwords are never persisted there.

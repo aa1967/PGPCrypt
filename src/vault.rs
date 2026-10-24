@@ -676,7 +676,7 @@ impl Vault {
         // No decoded data is exposed until the complete age stream authenticates.
         let stored: Stored = serde_json::from_slice(&plaintext).context("Invalid vault schema")?;
         ensure!(
-            stored.application == "PGPCrypt" && matches!(stored.schema, 1..=9),
+            stored.application == "PGPCrypt" && matches!(stored.schema, 1..=10),
             "Unsupported vault schema"
         );
         ensure!(
@@ -899,7 +899,7 @@ impl Vault {
         }
         let mut plaintext = Zeroizing::new(serde_json::to_vec(&StoredRef {
             application: "PGPCrypt",
-            schema: 9,
+            schema: 10,
             data: &self.data,
         })?);
         let size = plaintext.len().div_ceil(PAD) * PAD;
