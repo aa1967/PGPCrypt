@@ -25,6 +25,7 @@
 #include <QMessageBox>
 #include <QProgressBar>
 #include <QPointer>
+#include <QSet>
 #include <QPushButton>
 #include <QSpinBox>
 #include <QTabWidget>
@@ -74,11 +75,14 @@ inline QString description(const Interfaces& object) {
     if(!backing.isEmpty()) result += " — " + backing;
     return result;
 }
-inline bool selectable(const Interfaces& object) {
+inline bool selectable(const Interfaces& object, bool includeInternal = false) {
     const auto block = object.value(Block);
-    if(!block.contains("HintSystem") || block.value("HintSystem").toBool()) return false;
-    return block.value("IdType").toString() == "crypto_LUKS"
-        || (object.contains(Loop) && object.value(Loop).value("SetupByUID").toUInt() == ::getuid());
+    // UDisks conservatively marks loop devices as system devices too. A loop
+    // created by this user is not an operating-system disk merely for that reason.
+    if(object.contains(Loop) && object.value(Loop).contains("SetupByUID")
+       && object.value(Loop).value("SetupByUID").toUInt() == ::getuid()) return true;
+    if(!block.contains("HintSystem") || (block.value("HintSystem").toBool() && !includeInternal)) return false;
+    return block.value("IdType").toString() == "crypto_LUKS";
 }
 
 struct File final {
@@ -147,6 +151,7 @@ class Service final : public QObject {
     QString destination;
 public:
     Objects objects;
+    bool includeInternal = false;
     // Connection injection is for the isolated fake-service test. Production
     // always uses the system bus and the well-known UDisks service name.
     explicit Service(QObject* parent, QDBusConnection connection = QDBusConnection::systemBus(),
@@ -192,6 +197,29 @@ public:
         });
     }
 
+    bool allowed(const QString& path) const {
+        if(!selectable(objects.value(QDBusObjectPath(path)),includeInternal)) return false;
+        QSet<QString> children{path};
+        for(int pass=0;pass<32;++pass) {
+            const auto before=children.size();
+            for(auto it=objects.cbegin();it!=objects.cend();++it) {
+                const auto parent=pathValue(it.value().value(Block).value("CryptoBackingDevice"));
+                const auto table=pathValue(it.value().value("org.freedesktop.UDisks2.Partition").value("Table"));
+                if(children.contains(parent) || children.contains(table)) children.insert(it.key().path());
+                if(children.contains(it.key().path())) {
+                    const auto clear=pathValue(it.value().value(Encrypted).value("CleartextDevice"));
+                    if(!clear.isEmpty() && clear!="/") children.insert(clear);
+                }
+            }
+            if(before==children.size()) break;
+            if(pass==31) return false;
+        }
+        const QSet<QString> protectedMounts{"/","/boot","/boot/efi","/usr","/var","/home","/run","/etc","/bin","/lib","/lib64","/sbin","/tmp"};
+        for(const auto& child:children) for(const auto& folder:mounts(objects.value(QDBusObjectPath(child))))
+            if(protectedMounts.contains(folder)) return false;
+        return true;
+    }
+
     void attach(const std::shared_ptr<File>& file, bool readOnly, std::function<void(QString,QString)> completed) {
         refresh([this,file,readOnly,completed](const QString& error) {
             if(!error.isEmpty()) {completed({},error); return;}
@@ -235,7 +263,7 @@ public:
 
     void mountCurrent(const QString& encrypted, QByteArray password, bool readOnly, Completion completed) {
         const auto object = objects.value(QDBusObjectPath(encrypted));
-        if(!selectable(object) || object.value(Block).value("IdType").toString() != "crypto_LUKS") {
+        if(!allowed(encrypted) || object.value(Block).value("IdType").toString() != "crypto_LUKS") {
             password.fill('\0'); completed("Select a non-system LUKS volume. This utility does not format existing drives."); return;
         }
         const auto clear = pathValue(object.value(Encrypted).value("CleartextDevice"));
@@ -297,7 +325,7 @@ public:
         refresh([this,path,completed](const QString& error) {
             if(!error.isEmpty()) {completed(error); return;}
             const auto object = objects.value(QDBusObjectPath(path));
-            if(!selectable(object)) {completed("Select a non-system LUKS volume or a container loop owned by your user."); return;}
+            if(!allowed(path)) {completed("Select an allowed LUKS volume or a container loop owned by your user. Active operating-system volumes cannot be closed here."); return;}
             if(!object.contains(Encrypted)) {
                 if(!mounts(object).isEmpty()) {completed("This is not a LUKS volume. Unmount it in your file manager before detaching its loop device."); return;}
                 detach(path,completed); return;
@@ -339,7 +367,7 @@ class Dialog final : public QDialog {
     QTabWidget* tabs;
     QLineEdit *source, *destination, *password, *confirmation;
     QComboBox *sourceType, *devices;
-    QCheckBox* readOnly;
+    QCheckBox *readOnly, *internal;
     QSpinBox* capacity;
     QTableWidget* volumes;
     QLabel *status, *strength;
@@ -354,12 +382,12 @@ class Dialog final : public QDialog {
     void showStatus(const QString& text) {status->setText(text);}
     void setBusy(bool value) {
         busy=value; tabs->setEnabled(!value); run->setEnabled(!value && available);
-        refreshButton->setEnabled(!value); buttons->setEnabled(!value);
+        refreshButton->setEnabled(!value); buttons->setEnabled(!value); internal->setEnabled(!value);
     }
     void populate() {
         const auto selected = devices->currentData(); devices->clear(); volumes->setRowCount(0);
         for(auto it=service.objects.cbegin();it!=service.objects.cend();++it) {
-            const auto& object=it.value(); if(!selectable(object)) continue;
+            const auto& object=it.value(); if(!service.allowed(it.key().path())) continue;
             const auto path=it.key().path(); const auto text=description(object);
             const bool encrypted=object.value(Block).value("IdType").toString()=="crypto_LUKS";
             if(encrypted) devices->addItem(text,path);
@@ -438,6 +466,8 @@ public:
         setObjectName("luksDialog"); setWindowTitle("LUKS volumes"); resize(830,540);
         auto* layout=new QVBoxLayout(this);
         auto* heading=new QHBoxLayout; heading->addWidget(new QLabel("LUKS drives and containers")); heading->addWidget(contextHelp(this,Help)); heading->addStretch(); layout->addLayout(heading);
+        auto* scopeRow=new QHBoxLayout; internal=new QCheckBox("Show internal LUKS drives"); scopeRow->addWidget(internal); scopeRow->addWidget(contextHelp(this,"UDisks labels many internal and Qubes virtual disks as system devices. Enable to include unused internal LUKS drives; the OS may request administrator authorization. Active volumes mounted at operating-system locations remain excluded. This never enables drive formatting. Container loops owned by your user are always included.")); scopeRow->addStretch(); layout->addLayout(scopeRow);
+        connect(internal,&QCheckBox::toggled,this,[this](bool value) {service.includeInternal=value; if(!busy) refresh(false);});
         tabs=new QTabWidget; layout->addWidget(tabs);
         auto* open=new QWidget; auto* openForm=new QFormLayout(open);
         sourceType=new QComboBox; sourceType->addItems({"Container file","LUKS drive / partition"}); openForm->addRow("Source",sourceType);

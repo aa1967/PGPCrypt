@@ -34,8 +34,12 @@ landing page.
 Existing file containers are opened without following a final symlink, checked
 as regular files and attached using a Unix descriptor. Existing same-user loop
 attachments are reused to avoid opening the same backing file twice through
-this utility. The disk picker excludes system devices and shows detected LUKS
-volumes; only unlocking, mounting and closing are exposed for existing drives.
+this utility. The disk picker hides system-marked drives by default. **Show
+internal LUKS drives** includes otherwise eligible internal/Qubes virtual drives,
+subject to OS authorization. Active volumes at operating-system mount locations
+remain excluded. Container loops owned by your user are included even when
+UDisks conservatively marks them as system devices. Only unlocking, mounting
+and closing are exposed for existing drives.
 Only a directly contained filesystem is mounted; partition tables inside a
 LUKS volume require an external disk tool. Mount requests use
 `nosuid,nodev,noexec` and optionally `ro`. Existing writable mounts are not

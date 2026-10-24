@@ -39,7 +39,9 @@ public:
             {Luks::Loop,{{"SetupByUID",static_cast<uint>(::getuid())},{"BackingFile",QFile::encodeName(backing)}}},
             {Luks::Encrypted,{{"CleartextDevice",QVariant::fromValue(QDBusObjectPath("/"))}}}};
         objects[QDBusObjectPath(clear)]={{Luks::Block,{{"ReadOnly",false}}},{Luks::Filesystem,{}}};
-        objects[QDBusObjectPath(system)]={{Luks::Block,{{"HintSystem",true},{"IdType","crypto_LUKS"}}},{Luks::Encrypted,{}}};
+        const auto systemClear=Luks::Root+"/block_devices/dm_system";
+        objects[QDBusObjectPath(system)]={{Luks::Block,{{"HintSystem",true},{"IdType","crypto_LUKS"}}},{Luks::Encrypted,{{"CleartextDevice",QVariant::fromValue(QDBusObjectPath(systemClear))}}}};
+        objects[QDBusObjectPath(systemClear)]={{Luks::Filesystem,{{"MountPoints",QVariant::fromValue(QList<QByteArray>{QByteArray("/\0",2)})}}}};
         setMounted(false);
     }
     bool handleMessage(const QDBusMessage& message,const QDBusConnection& connection) override {
@@ -108,6 +110,11 @@ int main(int argc,char** argv) {
     Luks::Service service(&app,client,"org.pgpcrypt.TestDisks");
     require(await([&](auto done) {service.refresh(done);}).isEmpty(),"read typed device map");
     require(!Luks::selectable(service.objects.value(QDBusObjectPath(fake.system))),"exclude system volume");
+    service.includeInternal=true;
+    require(!service.allowed(fake.system),"exclude active OS volume even when internal drives are enabled");
+    service.includeInternal=false;
+    auto systemMarkedLoop=service.objects.value(QDBusObjectPath(fake.loop)); systemMarkedLoop[Luks::Block]["HintSystem"]=true;
+    require(Luks::selectable(systemMarkedLoop),"include same-user loop despite conservative UDisks hint");
     require(await([&](auto done) {service.mount(fake.system,{},false,done);}).contains("non-system"),"system mount rejected");
     require(await([&](auto done) {service.formatNew(existing,{},done);}).contains("newly"),"unallocated file cannot be formatted");
     auto reopened=Luks::openFile(filename,false,false,error); require(reopened!=nullptr,"open existing file");
