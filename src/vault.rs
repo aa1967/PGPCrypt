@@ -49,6 +49,10 @@ pub struct Preferences {
     pub show_session_stats: bool,
     #[serde(default)]
     pub allow_removable_media: bool,
+    #[serde(default)]
+    pub activity_welcome: String,
+    #[serde(default = "crate::workflows::defaults")]
+    pub workflows: Vec<crate::workflows::Preset>,
 }
 fn default_theme() -> String {
     "light".into()
@@ -66,6 +70,8 @@ impl Default for Preferences {
             activity_clear_seconds: 0,
             show_session_stats: false,
             allow_removable_media: false,
+            activity_welcome: String::new(),
+            workflows: crate::workflows::defaults(),
         }
     }
 }
@@ -96,6 +102,20 @@ impl Preferences {
             ),
             "Unsupported theme"
         );
+        ensure!(
+            self.activity_welcome.len() <= 2048
+                && self.activity_welcome.lines().count() <= 16
+                && self
+                    .activity_welcome
+                    .chars()
+                    .all(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+                && !self
+                    .activity_welcome
+                    .chars()
+                    .any(|c| matches!(c, '\u{fffe}' | '\u{ffff}')),
+            "Welcome text must be at most 2 KiB / 16 lines, without control sequences"
+        );
+        crate::workflows::validate(&self.workflows)?;
         Ok(())
     }
 }
@@ -656,7 +676,7 @@ impl Vault {
         // No decoded data is exposed until the complete age stream authenticates.
         let stored: Stored = serde_json::from_slice(&plaintext).context("Invalid vault schema")?;
         ensure!(
-            stored.application == "PGPCrypt" && matches!(stored.schema, 1..=8),
+            stored.application == "PGPCrypt" && matches!(stored.schema, 1..=9),
             "Unsupported vault schema"
         );
         ensure!(
@@ -879,7 +899,7 @@ impl Vault {
         }
         let mut plaintext = Zeroizing::new(serde_json::to_vec(&StoredRef {
             application: "PGPCrypt",
-            schema: 8,
+            schema: 9,
             data: &self.data,
         })?);
         let size = plaintext.len().div_ceil(PAD) * PAD;

@@ -159,3 +159,27 @@ documents and key references live under those groups; canonical armored keys
 remain single entries in the PGPCrypt group. Stable IDs support migration and
 external group edits while avoiding duplicate secret material for overlapping
 profiles. Older supported layouts migrate during save. See KDBX_COMPATIBILITY.md.
+
+
+## Alpha14 manual pipelines and public diagnostics
+
+Age schema 9 / KDBX settings schema 8 add bounded declarative workflow presets
+and a plain welcome block to encrypted preferences. The UI runs one step at a
+time against the captured profile/signer/recipients. No scripts, background
+triggers, file writes or credential storage are permitted. Output is published
+only after all steps succeed. Authenticated public signer metadata is bound to
+a digest of exact Output and checked against current profile membership before
+reuse; changing Output invalidates the proof. See WORKFLOWS.md.
+
+Subkey plans attach up to 16 bindings in memory under one bounded unlock-work
+budget, then commit the complete certificate once. A failure cannot leave a
+partially saved batch. Existing certification/expiry/policy checks apply to
+every row; new subkeys require the primary secret.
+
+Activity now permits explicitly selected, bounded public metadata (names,
+fingerprints, basenames, document titles and ordinary setting names/states).
+Reasons remain fixed codes, and control/format characters are stripped. Message
+bodies, passwords, raw errors and advanced-protection setup/outcomes remain
+excluded. Logs and optional window counters disappear when lock replaces the
+UI process. Inventory refresh uses existing collection caches, not repeated
+worker scans. No system journal integration or persistent login history is added.

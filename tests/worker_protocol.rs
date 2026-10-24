@@ -499,7 +499,7 @@ fn preferences_subkeys_and_password_requests_roundtrip() -> Result<()> {
                 false
             );
         }
-        let preferences = json!({"auto_lock":true,"lock_on_focus_loss":false,"lock_on_session_events":true,"clipboard_clear_seconds":1800,"theme":"solarized","qubes_rpc":false,"notepad_popout":false,"activity_clear_seconds":300,"show_session_stats":true,"allow_removable_media":true});
+        let preferences = json!({"auto_lock":true,"lock_on_focus_loss":false,"lock_on_session_events":true,"clipboard_clear_seconds":1800,"theme":"solarized","qubes_rpc":false,"notepad_popout":false,"activity_clear_seconds":300,"show_session_stats":true,"allow_removable_media":true,"activity_welcome":"PGPCrypt\n+------ +","workflows":[{"name":"Portable pipeline","steps":["sign","encrypt"]}]});
         for theme in [
             "warm-light",
             "nord",
@@ -1178,6 +1178,131 @@ fn identity_metadata_and_document_properties_survive_moves_collisions_and_conver
         assert_eq!(
             peer.ok("document_get", json!({"document_id":second["id"]}))?["text"],
             "second private body"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn subkey_batches_are_atomic_and_workflow_metadata_is_portable() -> Result<()> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    for format in ["age", "kdbx"] {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join(if format == "age" {
+            "batch.age"
+        } else {
+            "batch.kdbx"
+        });
+        let copy = directory.path().join(if format == "age" {
+            "copy.kdbx"
+        } else {
+            "copy.age"
+        });
+        let mut peer = Peer::new()?;
+        peer.ok(
+            "create",
+            json!({"path":path,"password":"fixture vault","format":format}),
+        )?;
+        let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+        let generated=peer.ok("generate",json!({"password":"x","key_options":{
+            "name":"Batch fixture","algorithm":"cv25519","layout":"subkeys","certification":true,
+            "signing":false,"transport_encryption":false,"storage_encryption":false,"authentication":false,
+            "expires_at":now+90*86400
+        }}))?;
+        let fp = generated["fingerprint"].as_str().unwrap().to_owned();
+        let before = std::fs::read(&path)?;
+        let failed = peer.raw(
+            "add_subkeys",
+            json!({"fingerprint":fp,"password":"x","new_password":"x","subkey_batch":[
+                {"purpose":"sign","algorithm":"cv25519","expires_at":now+7*86400},
+                {"purpose":"encrypt","algorithm":"cv25519","expires_at":now+100*86400}
+            ]}),
+        )?;
+        assert_eq!(failed["ok"], false);
+        assert_eq!(failed["diagnostic"], "subkey_configuration");
+        assert_eq!(
+            std::fs::read(&path)?,
+            before,
+            "invalid later row partially saved its earlier subkey"
+        );
+        assert_eq!(
+            peer.ok("subkeys", json!({"fingerprint":fp}))?["keys"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        let plan = json!([
+            {"purpose":"sign","algorithm":"cv25519","expires_at":now+7*86400},
+            {"purpose":"encrypt","algorithm":"cv25519","expires_at":now+14*86400},
+            {"purpose":"authenticate","algorithm":"p256","expires_at":now+30*86400}
+        ]);
+        let result = peer.ok(
+            "add_subkeys",
+            json!({"fingerprint":fp,"password":"x","new_password":"x","subkey_batch":plan}),
+        )?;
+        assert_eq!(result["added"], 3);
+        let listed = peer.ok("list", json!({}))?;
+        assert_eq!(listed["keys"][0]["subkey_count"], 3);
+        assert_eq!(listed["keys"][0]["primary_secret_available"], true);
+        let keys = peer.ok("subkeys", json!({"fingerprint":fp}))?["keys"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert_eq!(keys.len(), 4);
+        for days in [7, 14, 30] {
+            assert!(keys.iter().any(|key| {
+                !key["primary"].as_bool().unwrap()
+                    && key["expires_at"]
+                        .as_u64()
+                        .is_some_and(|value| value.abs_diff(now + days * 86400) <= 1)
+            }));
+        }
+        let signed = peer.ok(
+            "sign",
+            json!({"fingerprint":fp,"password":"x","text":"batch workflow fixture"}),
+        )?["text"]
+            .clone();
+        let encrypted =
+            peer.ok("encrypt", json!({"recipients":[fp],"text":signed}))?["text"].clone();
+        let decrypted = peer.ok("decrypt", json!({"password":"x","text":encrypted}))?;
+        assert_eq!(decrypted["decryption_keys"], json!([fp]));
+        let verified = peer.ok("verify", json!({"text":decrypted["text"]}))?;
+        assert_eq!(verified["text"], "batch workflow fixture");
+        assert_eq!(verified["signer_details"][0]["fingerprint"], fp);
+        let preferences = json!({"activity_welcome":"+--- PGPCrypt ---+\n|  fixture art  |\n+---------------+","workflows":[{"name":"Portable fixture","steps":["sign","encrypt"]}]});
+        peer.ok("settings_set", json!({"preferences":preferences}))?;
+        let before = std::fs::read(&path)?;
+        for malicious in [
+            json!({"workflows":[{"name":"unsafe","steps":["shell"]}]}),
+            json!({"workflows":[{"name":"same","steps":["sign"]},{"name":" SAME ","steps":["encrypt"]}]}),
+            json!({"activity_welcome":"\u{001b}[31m"}),
+        ] {
+            assert_eq!(
+                peer.raw("settings_set", json!({"preferences":malicious}))?["ok"],
+                false
+            );
+            assert_eq!(std::fs::read(&path)?, before);
+        }
+        peer.ok(
+            "convert_copy",
+            json!({"path":copy,"password":"copy","format":if format=="age" {"kdbx"} else {"age"}}),
+        )?;
+        peer.ok("lock", json!({}))?;
+        assert!(peer.child.wait()?.success());
+        let mut reopened = Peer::new()?;
+        let settings = reopened.ok("open", json!({"path":copy,"password":"copy"}))?;
+        assert_eq!(
+            settings["preferences"]["workflows"],
+            preferences["workflows"]
+        );
+        assert_eq!(
+            settings["preferences"]["activity_welcome"],
+            preferences["activity_welcome"]
+        );
+        assert_eq!(
+            reopened.ok("list", json!({}))?["keys"][0]["subkey_count"],
+            3
         );
     }
     Ok(())

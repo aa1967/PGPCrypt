@@ -45,12 +45,15 @@ storage. Unknown network/FUSE aliases, hostile same-user mount races and all
 hardware configurations are not covered by this application preference.
 Use Qubes USB/device policy for system-wide isolation.
 
-Activity uses fixed messages, a 200-event bound, memory-only storage and optional
-periodic clearing. Clear resets it to Ready. No content, names, fingerprints,
-paths, credentials, password roles or protection events are recorded. Optional
-session counters include completed actions and failed opens in this GUI launch;
-a failed open can mean a file error, not just a bad password. Other processes,
-offline attacks and prior launches are not tracked. Counters default off.
+Activity uses fixed event/reason messages plus bounded, sanitized public metadata:
+key names/fingerprints, file basenames, document titles and ordinary setting
+changes. It has a 200-event bound, memory-only storage and optional periodic
+clearing. Clear resets entries to Ready. Message bodies, full paths, credentials,
+password roles and advanced-protection events are excluded. Inventory counts
+are always shown while unlocked; optional action/failed-open counters reset on
+lock, window closure/restart or reboot. A failed open can mean a file error,
+not just a bad password. Other processes, attacks against the encrypted file
+and prior sessions are not tracked. Attempt counters default off.
 
 ## Deferred sandbox design
 

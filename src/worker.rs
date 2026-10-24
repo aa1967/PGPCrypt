@@ -55,6 +55,8 @@ pub struct Request {
     #[serde(default)]
     pub subkey_options: Option<pgp::SubkeyOptions>,
     #[serde(default)]
+    pub subkey_batch: Vec<pgp::SubkeyOptions>,
+    #[serde(default)]
     pub profile_id: String,
     #[serde(default)]
     pub profile_name: String,
@@ -150,6 +152,22 @@ impl Session {
             vault.data = old;
         }
         result
+    }
+
+    fn key_summary(cert: &Cert) -> Value {
+        let policy = StandardPolicy::new();
+        let identities = cert
+            .with_policy(&policy, None)
+            .ok()
+            .map(|valid| {
+                valid
+                    .userids()
+                    .revoked(false)
+                    .map(|u| String::from_utf8_lossy(u.userid().value()).into_owned())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        json!({"fingerprint":cert.fingerprint().to_hex(),"identities":identities})
     }
 
     fn profile_document_counts(data: &VaultData) -> Value {
@@ -362,7 +380,7 @@ impl Session {
                         // Only show identities with a current valid self-binding.
                         // This still does not establish the owner's real identity.
                         "identities":cert.with_policy(&policy,None).ok().map(|valid|valid.userids().revoked(false).map(|u|String::from_utf8_lossy(u.userid().value()).into_owned()).collect::<Vec<_>>()).unwrap_or_default(),
-                        "has_secret":cert.is_tsk(), "status":status,
+                        "has_secret":cert.is_tsk(), "status":status, "primary_secret_available":cert.primary_key().key().has_secret(), "primary_can_certify":cert.with_policy(&policy,None).ok().is_some_and(|valid|valid.primary_key().for_certification()), "subkey_count":cert.keys().subkeys().count(),
                         "has_revocation":vault.data.revocations.iter().any(|r|r.fingerprint==cert.fingerprint().to_hex()),
                         "secret_protected":cert.is_tsk() && cert.keys().secret().all(|ka|ka.key().secret().is_encrypted()),
                         "secret_any_protected":cert.keys().secret().any(|ka|ka.key().secret().is_encrypted()),
@@ -498,7 +516,24 @@ impl Session {
                     .key_options
                     .as_ref()
                     .context("Key options are required")?;
-                let (cert, armor) = pgp::generate_with_options(options, &request.password)?;
+                ensure!(
+                    request.subkey_batch.len() <= 16,
+                    "At most 16 planned subkeys are supported"
+                );
+                ensure!(
+                    request.subkey_batch.is_empty() || options.layout == "subkeys",
+                    "Individual subkeys require the subkey layout"
+                );
+                let (mut cert, armor) = pgp::generate_with_options(options, &request.password)?;
+                if !request.subkey_batch.is_empty() {
+                    cert = pgp::add_subkeys(
+                        &cert,
+                        &request.subkey_batch,
+                        &request.password,
+                        &request.password,
+                    )?;
+                }
+                let summary = Self::key_summary(&cert);
                 let fingerprint = cert.fingerprint().to_hex();
                 // Key, recovery ticket and selected-profile membership commit together.
                 let encoded = pgp::encode(&cert)?;
@@ -511,12 +546,14 @@ impl Session {
                     });
                     Ok(())
                 })?;
-                Ok(json!({"saved":true,"fingerprint":fingerprint}))
+                Ok(json!({"saved":true,"fingerprint":fingerprint,"key":summary}))
             }
             "import" => {
                 self.vault()?;
-                self.store(pgp::parse(request.text.as_bytes())?, &request.profile_id)?;
-                Ok(json!({"saved":true}))
+                let cert = pgp::parse(request.text.as_bytes())?;
+                let summary = Self::key_summary(&cert);
+                self.store(cert, &request.profile_id)?;
+                Ok(json!({"saved":true,"key":summary}))
             }
             "public_export" => {
                 let cert = self
@@ -558,6 +595,22 @@ impl Session {
                 )?;
                 self.store(updated, "")?;
                 Ok(json!({"saved":true}))
+            }
+            "add_subkeys" => {
+                let cert = self
+                    .certs()?
+                    .into_iter()
+                    .find(|c| c.fingerprint().to_hex() == request.fingerprint)
+                    .context("Select a private key")?;
+                let updated = pgp::add_subkeys(
+                    &cert,
+                    &request.subkey_batch,
+                    &request.password,
+                    &request.new_password,
+                )?;
+                let summary = Self::key_summary(&updated);
+                self.store(updated, "")?;
+                Ok(json!({"saved":true,"added":request.subkey_batch.len(),"key":summary}))
             }
             "private_export" | "protected_private_export" => {
                 let cert = self
@@ -741,7 +794,7 @@ impl Session {
                     json!({"fingerprint":fingerprint,"key_id":fingerprint.get(fingerprint.len().saturating_sub(16)..).unwrap_or(fingerprint),"identities":identities})
                 }).collect::<Vec<_>>();
                 Ok(
-                    json!({"text":opened.text.as_str(),"signers":opened.signers,"signer_details":signer_details}),
+                    json!({"text":opened.text.as_str(),"signers":opened.signers,"signer_details":signer_details,"decryption_keys":opened.decryption_keys}),
                 )
             }
             "notes_get" => Ok(json!({"text":self.vault()?.data.notes})),
@@ -764,6 +817,40 @@ impl Session {
             }
             _ => bail!("Unknown operation"),
         }
+    }
+}
+
+fn diagnostic_code(operation: &str, error: &anyhow::Error) -> &'static str {
+    for cause in error.chain() {
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            match io.kind() {
+                std::io::ErrorKind::PermissionDenied => return "storage_permission",
+                std::io::ErrorKind::NotFound => return "storage_missing",
+                std::io::ErrorKind::AlreadyExists => return "storage_exists",
+                _ => {}
+            }
+            if io.raw_os_error() == Some(libc::ENOSPC) {
+                return "storage_full";
+            }
+            if io.raw_os_error() == Some(libc::EROFS) {
+                return "storage_read_only";
+            }
+        }
+    }
+    match operation {
+        "generate" => "key_generation",
+        "import" => "key_import",
+        "add_subkey" | "add_subkeys" => "subkey_configuration",
+        "sign" => "signing_key",
+        "encrypt" => "encryption_selection",
+        "decrypt" => "decryption_authentication",
+        "verify" => "signature_validation",
+        "settings_set" => "settings_or_save",
+        "profile_save" | "profile_delete" => "identity_or_save",
+        "document_save" | "document_get" | "document_properties" | "document_delete" => {
+            "document_or_save"
+        }
+        _ => "operation_failed",
     }
 }
 
@@ -813,7 +900,7 @@ pub fn run(mut input: impl BufRead, mut output: impl Write) -> Result<()> {
                 } else {
                     "operation_failed"
                 };
-                json!({"id":request.id,"ok":false,"error":format!("{error:#}"),"code":code})
+                json!({"id":request.id,"ok":false,"error":format!("{error:#}"),"code":code,"diagnostic":diagnostic_code(&request.op,&error)})
             }
         };
         let bytes = Zeroizing::new(serde_json::to_vec(&result)?);

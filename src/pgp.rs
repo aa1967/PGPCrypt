@@ -446,11 +446,53 @@ pub struct SubkeyOptions {
     pub purpose: String,
     pub expires_at: Option<u64>,
 }
+/// All generated packets stay in memory until the caller commits the complete
+/// certificate. A later invalid row therefore cannot leave a partial save.
+pub fn add_subkeys(
+    cert: &Cert,
+    plan: &[SubkeyOptions],
+    primary_password: &str,
+    subkey_password: &str,
+) -> Result<Cert> {
+    ensure!(
+        (1..=16).contains(&plan.len()),
+        "Choose 1–16 subkeys per batch"
+    );
+    let mut updated = cert.clone();
+    let mut budget = SecretUnlockBudget::default();
+    for options in plan {
+        updated = add_subkey_with_budget(
+            &updated,
+            options,
+            primary_password,
+            subkey_password,
+            &mut budget,
+        )?;
+    }
+    Ok(updated)
+}
+
 pub fn add_subkey(
     cert: &Cert,
     options: &SubkeyOptions,
     primary_password: &str,
     subkey_password: &str,
+) -> Result<Cert> {
+    add_subkey_with_budget(
+        cert,
+        options,
+        primary_password,
+        subkey_password,
+        &mut SecretUnlockBudget::default(),
+    )
+}
+
+fn add_subkey_with_budget(
+    cert: &Cert,
+    options: &SubkeyOptions,
+    primary_password: &str,
+    subkey_password: &str,
+    budget: &mut SecretUnlockBudget,
 ) -> Result<Cert> {
     use openpgp::cert::{CipherSuite, KeyBuilder};
     crate::password::validate_new_password(subkey_password)?;
@@ -467,7 +509,7 @@ pub fn add_subkey(
         .clone()
         .parts_into_secret()
         .context("Primary private key required to certify a new subkey")?;
-    let primary = SecretUnlockBudget::default().unlock(primary, primary_password)?;
+    let primary = budget.unlock(primary, primary_password)?;
     let suite = match options.algorithm.as_str() {
         "cv25519" => CipherSuite::Cv25519,
         "rsa2048" => CipherSuite::RSA2k,
@@ -604,6 +646,7 @@ fn validate_for_new_operation(cert: &Cert, policy: &StandardPolicy) -> Result<()
 pub struct Opened {
     pub text: Zeroizing<String>,
     pub signers: Vec<String>,
+    pub decryption_keys: Vec<String>,
 }
 
 struct Helper {
@@ -611,6 +654,7 @@ struct Helper {
     password: Zeroizing<String>,
     require_signature: bool,
     signers: Vec<String>,
+    decryption_keys: Vec<String>,
     unlock_budget: SecretUnlockBudget,
 }
 
@@ -687,6 +731,7 @@ impl DecryptionHelper for Helper {
                     if let Some((algo, session_key)) = pkesk.decrypt(&mut pair, sym_algo)
                         && decrypt(algo, &session_key)
                     {
+                        self.decryption_keys.push(cert.fingerprint().to_hex());
                         return Ok(Some(cert.clone()));
                     }
                 }
@@ -728,13 +773,19 @@ pub fn decrypt(text: &str, certs: Vec<Cert>, password: &str) -> Result<Opened> {
         password: Zeroizing::new(password.into()),
         require_signature: false,
         signers: vec![],
+        decryption_keys: vec![],
         unlock_budget: SecretUnlockBudget::default(),
     };
     let policy = StandardPolicy::new();
     let mut reader = DecryptorBuilder::from_bytes(text)?.with_policy(&policy, None, helper)?;
     let text = read_authenticated(&mut reader)?;
     let signers = reader.helper_ref().signers.clone();
-    Ok(Opened { text, signers })
+    let decryption_keys = reader.helper_ref().decryption_keys.clone();
+    Ok(Opened {
+        text,
+        signers,
+        decryption_keys,
+    })
 }
 
 pub fn verify(text: &str, certs: Vec<Cert>) -> Result<Opened> {
@@ -744,13 +795,19 @@ pub fn verify(text: &str, certs: Vec<Cert>) -> Result<Opened> {
         password: Zeroizing::new(String::new()),
         require_signature: true,
         signers: vec![],
+        decryption_keys: vec![],
         unlock_budget: SecretUnlockBudget::default(),
     };
     let policy = StandardPolicy::new();
     let mut reader = VerifierBuilder::from_bytes(text)?.with_policy(&policy, None, helper)?;
     let text = read_authenticated(&mut reader)?;
     let signers = reader.helper_ref().signers.clone();
-    Ok(Opened { text, signers })
+    let decryption_keys = reader.helper_ref().decryption_keys.clone();
+    Ok(Opened {
+        text,
+        signers,
+        decryption_keys,
+    })
 }
 
 #[cfg(test)]

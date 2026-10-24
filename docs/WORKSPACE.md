@@ -1,7 +1,7 @@
 # Profiles and saved documents
 
-The workspace has four navigation buttons: **Keys**, **Notepad**, **Identities**
-and **Vault settings**. All data described here stays inside the encrypted age/KDBX
+The workspace has five navigation buttons: **Keys**, **Notepad**, **Identities**,
+**Saved notes** and **Vault settings**. All data described here stays inside the encrypted age/KDBX
 vault, except files deliberately imported/exported, recent-vault paths, and
 optional protection companion records described separately.
 
@@ -59,7 +59,7 @@ than binary attachments: imported messages and stored documents are at most
 4 MiB each, new Encrypt/Sign plaintext is at most 1 MiB, and the entire vault
 payload remains limited to 16 MiB.
 
-**Paste** reads the clipboard into the input. **Copy all** copies the output.
+**Replace with clipboard** replaces the entire input. **Copy all** copies the output.
 Optional clipboard expiry follows the existing ownership rules; it cannot erase
 copies kept by clipboard managers or other Qubes.
 
@@ -73,7 +73,7 @@ full fingerprint over a trusted channel.
 
 ## Portable recovery
 
-age schema 7 stores `data.profiles` and `data.documents`. KDBX settings schema 6
+age schema 9 stores `data.profiles` and `data.documents`. KDBX settings schema 8
 stores profiles in protected `PGPCrypt.Profiles` JSON and actual identity
 groups. Each group contains an Identity details entry, its documents and
 references to canonical keys. Identity fields map to ordinary UserName, Email,
@@ -108,12 +108,25 @@ unsaved text or create another file writer. Main-window key/profile edits
 refresh those same controls. Lock closes session windows and discards unsaved
 text and the activity view.
 
-The terminal-style activity panel is an in-memory view of fixed application
-events with severity filters and colors. It does not invoke journalctl, write
-a log file or record paths, names, fingerprints, document contents, credentials,
-raw worker errors, Qubes peers or advanced-protection configuration/outcomes.
-Entries are bounded and cleared at lock. The panel is a troubleshooting aid,
-not an audit trail or proof of what happened on storage.
+The terminal-style activity panel stays in memory with severity filters, colors,
+a 200-event limit, Clear and optional periodic clearing. It records operation
+results, public key names/fingerprints, file basenames, document titles, ordinary
+setting changes and bounded troubleshooting reasons. It strips control/format
+characters from these fields. It never records message bodies, credentials,
+full paths, raw worker errors, Qubes peers or advanced-protection configuration
+and outcomes. Public metadata is visible while unlocked; lock clears the panel.
+It is a troubleshooting aid, not a durable audit trail or proof of storage events.
+
+The header always displays cached counts of keys, subkeys, identities, notes and
+workflows. Updating it does not scan the database each second. Optional window
+counters show unlocked duration, completed actions and failed opens before the
+successful unlock. They reset on lock (which replaces the UI process), closing
+or restarting the app, and reboot. They cannot see other processes or earlier
+sessions. A failed open may mean a missing/unreadable file as well as a wrong
+password. Encrypted preferences become available only after a successful unlock,
+so these optional counters appear then. Clear resets activity entries, not counters.
+An optional encrypted welcome block supports up to 16 lines / 2048 UTF-8 bytes of
+plain text, including ASCII art; it is never executed as terminal commands.
 
 Right-click key rows for public-key/fingerprint/value copying and the existing
 key-management actions. Private-key display still uses verified authentication.
@@ -134,4 +147,16 @@ Starting with alpha13, the launcher runs directly without a sandbox. Recent
 paths persist on this device unless disabled, and desktop lock/suspend hooks
 can receive the session’s signals. See [SANDBOX.md](SANDBOX.md) for retained
 protections and deferred isolation options. Activity can clear periodically to Ready;
-optional launch-only counters do not provide durable login history.
+optional window counters do not provide durable login history.
+
+## Chaining Notepad operations
+
+After Sign, use **Encrypt output** to encrypt the signed message without copying.
+After Decrypt, use **Verify output** to inspect the verified signer when the
+message was signed. Decrypt already checks embedded signatures: this action
+reopens the authenticated result only while Output remains exactly unchanged.
+It never treats unsigned plaintext as verified. For other signed output it
+performs normal verification. Failed actions do not overwrite the original
+Output with an intermediate result or leave an old verification badge.
+
+Reusable manual workflows are described in [WORKFLOWS.md](WORKFLOWS.md).

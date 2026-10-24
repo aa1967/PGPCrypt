@@ -3,7 +3,7 @@ name = "pgpcrypt"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
-description = "An experimental offline encrypted OpenPGP vault and desktop text workspace"
+description = "An experimental encrypted OpenPGP vault and desktop text workspace"
 default-run = "pgpcrypt-worker"
 
 [features]

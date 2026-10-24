@@ -1,7 +1,7 @@
 #pragma once
 
-// UI-only session diagnostics. Messages come from a closed vocabulary rather
-// than worker replies, operation names or user data. Nothing is written to disk.
+// UI-only session diagnostics. Event/reason text is fixed; explicitly selected
+// public metadata is bounded and rendered as plain text. Nothing is written to disk.
 #include <QApplication>
 #include <QClipboard>
 #include <QCryptographicHash>
@@ -63,6 +63,7 @@ enum class ActivityEvent {
     KeyImported,
     SubkeyAdded,
     PreferencesSaved,
+    IdentityUpdated,
     DocumentChanged,
     OperationFailed,
     VerificationPassed,
@@ -102,7 +103,7 @@ public:
         setTextInteractionFlags(Qt::TextSelectableByMouse | Qt::TextSelectableByKeyboard);
         document()->setMaximumBlockCount(200);
         setMinimumHeight(75);
-        setMaximumHeight(145);
+        setMaximumHeight(QWIDGETSIZE_MAX);
         setStyleSheet("QPlainTextEdit { background: #101820; color: #d5e6ec; border: 1px solid #40515b; border-radius: 4px; padding: 7px; }");
     }
 
@@ -114,14 +115,25 @@ public:
 
     bool warningsOnly() const { return warningsOnly_; }
 
-    void record(ActivityEvent event) {
-        // Deliberately no overload accepting a QString. In particular, never
-        // pass errors, paths, key identities, password roles or IPC op names.
+    static QString field(const QString& value,int limit=180) {
+        QString result;
+        for(const auto character:value) {
+            if(result.size()>=limit) {result.append("…"); break;}
+            const auto category=character.category();
+            if(character==QChar('\n') || character==QChar('\r') || character==QChar('\t')) {result.append(' '); continue;}
+            if(category==QChar::Other_Control || category==QChar::Other_Format || category==QChar::Other_Surrogate || category==QChar::Separator_Line || category==QChar::Separator_Paragraph) continue;
+            result.append(character);
+        }
+        return result;
+    }
+    void record(ActivityEvent event,const QStringList& details = {}) {
+        // Callers supply public metadata only. Never pass message bodies,
+        // credentials, raw worker errors or advanced-protection configuration.
         QString message;
         QColor color("#d5e6ec");
         switch (event) {
         case ActivityEvent::SessionReady:
-            message = "READY  Workspace available. Offline session.";
+            message = "READY  Workspace ready.";
             color = QColor("#9ed7ff");
             break;
         case ActivityEvent::OperationComplete:
@@ -142,6 +154,8 @@ public:
             message = "OK     New subkey saved."; color = QColor("#8de3a0"); break;
         case ActivityEvent::PreferencesSaved:
             message = "OK     Vault preferences saved."; color = QColor("#8de3a0"); break;
+        case ActivityEvent::IdentityUpdated:
+            message = "OK     Identity collection updated."; color = QColor("#8de3a0"); break;
         case ActivityEvent::DocumentChanged:
             message = "OK     Saved-note collection updated."; color = QColor("#8de3a0"); break;
         case ActivityEvent::KeyUpdated:
@@ -175,6 +189,7 @@ public:
         cursor.insertText(QDateTime::currentDateTime().toString("HH:mm:ss") + "  ", format);
         format.setForeground(color);
         cursor.insertText(message, format);
+        if(!details.isEmpty()) cursor.insertText("  |  "+field(details.join("  |  "),4096),format);
         cursor.block().setUserData(new Severity(event == ActivityEvent::OperationFailed
                                                || event == ActivityEvent::VerificationFailed));
         applyFilter();
@@ -185,7 +200,7 @@ public:
 
 inline QDialog* showVerificationDialog(QWidget* parent, bool passed,
                                        const QJsonArray& signerDetails,
-                                       const QJsonArray& cachedKeys) {
+                                       const QJsonArray& cachedKeys, const QString& sourceLabel="Input signature") {
     // An empty result cannot identify an authenticated signer. Never fall back
     // to identities claimed by an unverified message on the failure path.
     const bool verified = passed && !signerDetails.isEmpty();
@@ -207,7 +222,7 @@ inline QDialog* showVerificationDialog(QWidget* parent, bool passed,
     layout->addWidget(result);
 
     if (verified) {
-        auto* explanation = new QLabel("Compare the input signature’s resolved signer with the stored vault key. Names come from the matching certificate, not independently from the message:");
+        auto* explanation = new QLabel("Compare the authenticated signer with the stored vault key. Names come from the matching certificate, not independently from the message:");
         explanation->setTextFormat(Qt::PlainText);
         explanation->setWordWrap(true);
         layout->addWidget(explanation);
@@ -252,7 +267,7 @@ inline QDialog* showVerificationDialog(QWidget* parent, bool passed,
             const auto ordinal = QString::number(row / 2 + 1);
             rows.append("Signer " + ordinal);
             rows.append("Signer " + ordinal);
-            comparison->setItem(row, 0, new QTableWidgetItem("Input signature"));
+            comparison->setItem(row, 0, new QTableWidgetItem(sourceLabel));
             comparison->setItem(row + 1, 0, new QTableWidgetItem("Vault key"));
             comparison->setItem(row, 1, new QTableWidgetItem(verifiedName));
             comparison->setItem(row + 1, 1, new QTableWidgetItem(storedName));

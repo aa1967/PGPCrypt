@@ -63,9 +63,11 @@ normalize their protection first. These checks govern explicit actions inside
 an already-unlocked trusted session; they do not isolate keys from that session.
 
 The terminal-style activity panel accepts a fixed event vocabulary. It remains
-in memory, is bounded, and clears at lock; it does not write a journal or record
-user contents, paths, identities, fingerprints, raw errors, credentials or
-advanced-protection events. Ordinary dummy-session status avoids a direct UI
+in memory, is bounded, and clears at lock. It records bounded, sanitized public
+key identities/fingerprints, file basenames, document titles, ordinary setting
+changes and fixed diagnostic reasons. These are visible in the unlocked session.
+It never writes a journal or records message bodies, full paths, raw errors,
+credentials or advanced-protection events. Ordinary dummy-session status avoids a direct UI
 disclosure, but disabled actions, files, timings and forensic artifacts can
 still distinguish it. It remains read-only. See
 [the hidden-storage investigation](HIDDEN_STORAGE_RESEARCH.md).
