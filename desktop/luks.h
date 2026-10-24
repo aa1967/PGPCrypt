@@ -478,7 +478,7 @@ public:
         auto* fileRow=new QHBoxLayout; source=new QLineEdit; auto* browse=new QPushButton("Browse…"); fileRow->addWidget(source); fileRow->addWidget(browse); openForm->addRow("Container",fileRow);
         devices=new QComboBox; openForm->addRow("LUKS volume",devices); devices->setEnabled(false);
         readOnly=new QCheckBox("Mount read-only"); openForm->addRow(readOnly);
-        tabs->addTab(open,"Unlock & mount");
+        tabs->addTab(open,"Unlock && mount");
         auto* create=new QWidget; auto* createForm=new QFormLayout(create);
         auto* newRow=new QHBoxLayout; destination=new QLineEdit(QDir::home().filePath("vault.luks")); auto* choose=new QPushButton("Save as…"); newRow->addWidget(destination); newRow->addWidget(choose); createForm->addRow("New container",newRow);
         capacity=new QSpinBox; capacity->setRange(64,65536); capacity->setValue(256); capacity->setSuffix(" MiB"); createForm->addRow("Capacity",capacity);
@@ -496,8 +496,8 @@ public:
         connect(strengthTimer,&QTimer::timeout,this,[this] {if(tabs->currentIndex()!=1) return; auto bytes=password->text().toUtf8(); const auto entropy=ZxcvbnMatch(bytes.constData(),nullptr,nullptr); bytes.fill('\0'); const int score=entropy<10?0:entropy<20?1:entropy<26.575?2:entropy<33.22?3:4; strengthBar->setValue(score); strength->setText("Estimated strength: "+QStringList{"Very weak","Weak","Fair","Good","Strong"}[score]);});
         status=new QLabel; status->setTextFormat(Qt::PlainText); status->setWordWrap(true); status->setTextInteractionFlags(Qt::TextSelectableByMouse|Qt::TextSelectableByKeyboard); layout->addWidget(status);
         progress=new QProgressBar; progress->hide(); layout->addWidget(progress);
-        auto* actions=new QHBoxLayout; run=new QPushButton; run->setObjectName("luksRun"); actions->addWidget(run); refreshButton=new QPushButton("Refresh"); actions->addWidget(refreshButton); cancelAllocation=new QPushButton("Stop allocation"); cancelAllocation->hide(); actions->addWidget(cancelAllocation); connect(cancelAllocation,&QPushButton::clicked,this,[this] {cancelled->store(true); showStatus("Stopping allocation; the incomplete file will be left in place.");}); actions->addStretch(); buttons=new QDialogButtonBox(QDialogButtonBox::Close); actions->addWidget(buttons); layout->addLayout(actions);
-        const auto mode=[this,auth] {const auto index=tabs->currentIndex(); run->setText(index==0?"Unlock & mount":index==1?"Create container":"Unmount & lock"); password->clear(); confirmation->clear(); password->setMaxLength(index==1?256:32767); auth->setRowVisible(password,index!=2); auth->setRowVisible(confirmation,index==1); strength->setVisible(index==1); strengthBar->setVisible(index==1); strength->setText("Estimated strength: enter a password/passphrase"); strengthBar->setValue(0);};
+        auto* actions=new QHBoxLayout; run=new QPushButton; run->setDefault(true); run->setObjectName("luksRun"); actions->addWidget(run); refreshButton=new QPushButton("Refresh"); actions->addWidget(refreshButton); cancelAllocation=new QPushButton("Stop allocation"); cancelAllocation->hide(); actions->addWidget(cancelAllocation); connect(cancelAllocation,&QPushButton::clicked,this,[this] {cancelled->store(true); showStatus("Stopping allocation; the incomplete file will be left in place.");}); actions->addStretch(); buttons=new QDialogButtonBox(QDialogButtonBox::Close); actions->addWidget(buttons); layout->addLayout(actions);
+        const auto mode=[this,auth] {const auto index=tabs->currentIndex(); run->setText(index==0?"Unlock && mount":index==1?"Create container":"Unmount && lock"); password->clear(); confirmation->clear(); password->setMaxLength(index==1?256:32767); auth->setRowVisible(password,index!=2); auth->setRowVisible(confirmation,index==1); strength->setVisible(index==1); strengthBar->setVisible(index==1); strength->setText("Estimated strength: enter a password/passphrase"); strengthBar->setValue(0);};
         connect(tabs,&QTabWidget::currentChanged,this,[mode](int) {mode();}); mode();
         connect(sourceType,&QComboBox::currentIndexChanged,this,[this,browse](int index) {source->setEnabled(index==0); browse->setEnabled(index==0); devices->setEnabled(index==1);});
         connect(browse,&QPushButton::clicked,this,[this] {QFileDialog picker(this,"Open LUKS container",QDir::homePath()); picker.setOption(QFileDialog::DontUseNativeDialog); picker.setOption(QFileDialog::DontResolveSymlinks); picker.setFileMode(QFileDialog::ExistingFile); if(picker.exec()==QDialog::Accepted) source->setText(picker.selectedFiles().first());});
@@ -512,7 +512,7 @@ public:
 inline QWidget* panel(QWidget* parent) {
     auto* widget=new QWidget(parent); widget->setObjectName("luksPanel"); auto* row=new QHBoxLayout(widget); row->setContentsMargins(0,12,0,0);
     row->addWidget(new QLabel("LUKS")); row->addWidget(contextHelp(widget,Help)); row->addStretch();
-    const QStringList labels{"Unlock & mount…","Create LUKS2…","Unmount & lock…"};
+    const QStringList labels{"Unlock && mount…","Create LUKS2…","Unmount && lock…"};
     for(int i=0;i<labels.size();++i) {auto* button=new QPushButton(labels[i]); row->addWidget(button); QObject::connect(button,&QPushButton::clicked,widget,[widget,i] {Dialog dialog(widget,i); dialog.exec();});}
     return widget;
 }

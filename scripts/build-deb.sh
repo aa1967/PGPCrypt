@@ -70,7 +70,7 @@ Architecture: $package_arch
 Maintainer: PGPCrypt contributors
 Installed-Size: $installed_size
 Depends: libc6 (>= 2.41), libgcc-s1, libssl3t64 (>= 3.5.7-1~deb13u3), libsodium23, libzxcvbn0, libqt6core6t64 (>= 6.8.2), libqt6gui6 (>= 6.8.2), libqt6widgets6 (>= 6.8.2), libqt6dbus6 (>= 6.8.2), libqt6network6 (>= 6.8.2), qt6-qpa-plugins, qt6-wayland, udisks2 (>= 2.10), libblockdev-crypto3, cryptsetup-bin, e2fsprogs, polkitd
-Recommends: polkit-kde-agent-1 | lxpolkit
+Recommends: lxpolkit | polkit-kde-agent-1
 Description: Experimental encrypted OpenPGP vault and desktop text workspace
  Stores public and private OpenPGP keys and notes in a passphrase-encrypted vault.
  Qt6 desktop interface with a separate Rust crypto worker.
