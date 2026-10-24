@@ -1,5 +1,54 @@
 # Validation history
 
+## Alpha15 evidence
+
+Source `e5d8e49` and correction `7b6cba7` were pushed to `pgpcrypt-alpha15`
+before their affected functional checks. **78 distinct Rust checks passed**:
+60 core, 4 protection protocol, 1 GnuPG interop and 13 worker/lifecycle checks.
+The initial full run passed 77 checks; the new multi-signer test then failed
+because its readback used a nonexistent `settings_get` operation. The test was
+corrected to inspect the existing open response and passed on rerun for age and
+KDBX. No production Rust code changed for that correction. Remaining checks
+were not unnecessarily repeated locally; the tag workflow repeats the full suite.
+Formatting and final all-target/all-feature Clippy passed; desktop compilation
+uses warnings as errors.
+
+New worker coverage exercises multiple signers with separate passwords, public
+per-key password hints, explicit decryption-key restrictions, all-required signer
+verification, missing/incorrect signer rejection without a result payload, invalid
+filename patterns without modifying ciphertext, and portable structured workflow
+preferences through both conversion directions. Workflow-model tests reject
+unknown operations, credential fields, duplicate/malformed key selections,
+unsupported pattern tokens, path traversal and excessive steps.
+
+Independent age interoperability passed current schema 10 and legacy schemas
+1–9. Independent KeePassXC interoperability passed protected structured workflow
+preferences under settings schema 9, canonical keys, identity groups/references,
+external edits, stale-write refusal and conversion. Removable-media checks passed.
+
+Both actual packaged age/KDBX desktop workflows passed, including three batch
+files with valid inputs surrounding a bad input, separate result windows, private
+output modes, no overwrite/symlink behavior, continued execution after failure,
+unchanged Notepad input/output, side-by-side four-action panels and lock cleanup.
+Direct launcher startup, permission guidance and supervisor process replacement
+also passed. Package metadata, dependencies, source/licenses, modes, ownership,
+Qubes handlers and ELF RPATH checks passed. No system installation was performed.
+The layout was inspected in an offscreen screenshot, then recent-note columns
+were adjusted and the rebuilt package's desktop workflows passed again.
+
+Final README/evidence-only repackaging must preserve the validated executable
+and launcher hashes. Public package bytes, checksum and source commit are checked
+before publishing install links/tag. GitHub independently repeats its complete
+source/package/interoperability workflow before attaching release assets; consult
+that run for its remote result.
+
+These are component checks, not an independent audit. Native Qubes, USB hardware,
+desktop lock/suspend delivery and clipboard-manager behavior remain unvalidated.
+KDBX writing remains experimental upstream. Batch exports may be readable outside
+the vault, completed files survive later failure, and Qt/library copies are not
+all memory-locked. Scripts, arbitrary binary file processing and background or
+remote automation are not implemented. Exact limits are in WORKFLOWS.md.
+
 ## Alpha14 evidence
 
 Source `3db3f45` was pushed to `pgpcrypt-alpha14` before functional checks.
